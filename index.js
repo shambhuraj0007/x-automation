@@ -14,7 +14,7 @@
 require('dotenv').config();
 
 const logger = require('./src/logger');
-const { startQueueMonitor, startFallbackCron, runStartupCheck } = require('./src/scheduler');
+const { startFallbackCron, runStartupCheck } = require('./src/scheduler');
 
 // ── Startup banner ──────────────────────────────────────────────────────────
 function printBanner() {
@@ -25,8 +25,7 @@ function printBanner() {
   logger.info(`  Model    : ${process.env.GEMINI_MODEL || 'gemini-1.5-flash'}`);
   logger.info(`  Batch    : ${process.env.POSTS_PER_BATCH || 3} posts per refill`);
   logger.info(`  Spacing  : ${process.env.MIN_SPACING_MINUTES || 45}–${process.env.MAX_SPACING_MINUTES || 120} min`);
-  logger.info(`  Poll     : every ${process.env.QUEUE_POLL_INTERVAL_MINUTES || 10} min`);
-  logger.info(`  Threshold: refill when ≤ ${process.env.QUEUE_REFILL_THRESHOLD || 1} post`);
+  logger.info(`  Threshold: refill when ≤ ${process.env.QUEUE_SOFT_THRESHOLD || 3} post`);
   logger.info(`  Mode     : ${dryRun ? '🟡 DRY RUN (no real Buffer calls)' : '🟢 LIVE'}`);
   logger.info('═══════════════════════════════════════════════════');
 }
@@ -51,7 +50,6 @@ function validateEnv() {
 function setupShutdownHandlers(monitorHandle, cronTask) {
   const shutdown = (signal) => {
     logger.info(`\nReceived ${signal} — shutting down gracefully...`);
-    if (monitorHandle) clearInterval(monitorHandle);
     if (cronTask) cronTask.stop();
     logger.info('Twitter Automation Daemon stopped. Goodbye! 👋');
     process.exit(0);
@@ -84,14 +82,11 @@ async function main() {
   // 1. Startup check — fill queue immediately if needed
   await runStartupCheck();
 
-  // 2. Real-time monitor — polls every 10 min (configurable)
-  const monitorHandle = startQueueMonitor();
-
-  // 3. 4-hour fallback cron — safety net
+  // 2. 4-hour fallback cron — safety net
   const cronTask = startFallbackCron();
 
-  // 4. Register shutdown handlers
-  setupShutdownHandlers(monitorHandle, cronTask);
+  // 3. Register shutdown handlers
+  setupShutdownHandlers(null, cronTask);
 
   logger.info('✅ Daemon is running. Press Ctrl+C to stop.');
   logger.info(`📋 Logs are saved to: ${require('path').join(process.cwd(), 'logs')}`);

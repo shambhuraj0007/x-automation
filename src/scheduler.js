@@ -3,10 +3,10 @@
  * Core queue monitoring and refill logic.
  *
  * Implements:
- *  1. Real-time queue monitor (polls every QUEUE_POLL_INTERVAL_MINUTES)
- *     → triggers immediate refill when posts ≤ QUEUE_REFILL_THRESHOLD (default: 1)
- *  2. 4-hour fallback cron as a safety net
+ *  1. 4-hour cron scheduler
  *     → triggers refill when posts ≤ QUEUE_SOFT_THRESHOLD (default: 3)
+ *  2. Startup queue check
+ *     → to ensure initial population of the buffer
  */
 
 'use strict';
@@ -49,8 +49,6 @@ async function checkAndRefill({ threshold, reason }) {
   }
 }
 
-const { execSync } = require('child_process');
-const { generateImage } = require('./imageGen');
 
 /**
  * Unconditionally generate and schedule a fresh batch of posts.
@@ -65,33 +63,7 @@ async function _doRefill(reason) {
 
     const posts = await generatePosts({ count: batchSize });
 
-    // Step 2: Pre-generate images
-    let hasNewImages = false;
-    for (const post of posts) {
-      if (post.imagePrompt) {
-        post.imageUrl = await generateImage(post.imagePrompt);
-        if (post.imageUrl) {
-          hasNewImages = true;
-        }
-      }
-    }
 
-    // Step 3: Push images to GitHub so Buffer can access the public raw URLs
-    if (hasNewImages && process.env.GITHUB_ACTIONS === 'true') {
-      logger.info('Scheduler: pushing images to GitHub...');
-      try {
-        execSync('git config --global user.name "github-actions[bot]"');
-        execSync('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
-        execSync('git add data/images/');
-        execSync('git commit -m "chore: push generated images [skip ci]"');
-        execSync('git push');
-        logger.info('Scheduler: images pushed successfully.');
-        // Wait a few seconds for GitHub CDN to reflect
-        await new Promise(res => setTimeout(res, 5000));
-      } catch (err) {
-        logger.warn(`Scheduler: failed to push images to GitHub (or nothing to commit) — ${err.message}`);
-      }
-    }
 
     await schedulePosts(posts);
 
@@ -103,30 +75,7 @@ async function _doRefill(reason) {
   }
 }
 
-// ── Real-time queue monitor ─────────────────────────────────────────────────
 
-/**
- * Start polling the Buffer queue every N minutes.
- * Triggers an immediate refill when posts drop to ≤ QUEUE_REFILL_THRESHOLD.
- */
-function startQueueMonitor() {
-  const pollMins = parseInt(process.env.QUEUE_POLL_INTERVAL_MINUTES || '10', 10);
-  const threshold = parseInt(process.env.QUEUE_REFILL_THRESHOLD || '1', 10);
-
-  logger.info(`Scheduler: starting queue monitor (poll every ${pollMins} min, threshold ≤${threshold})`);
-
-  // Use setInterval rather than cron so we can use sub-minute values in tests
-  const intervalMs = pollMins * 60 * 1000;
-  const handle = setInterval(() => {
-    checkAndRefill({ threshold, reason: 'queue-monitor' });
-  }, intervalMs);
-
-  // Keep Node.js alive but don't block clean shutdown
-  handle.unref();
-  return handle;
-}
-
-// ── 4-hour fallback cron ────────────────────────────────────────────────────
 
 /**
  * Start a cron job that runs every 4 hours as a safety net.
@@ -157,4 +106,4 @@ async function runStartupCheck() {
   await checkAndRefill({ threshold: softThreshold, reason: 'startup' });
 }
 
-module.exports = { startQueueMonitor, startFallbackCron, runStartupCheck, checkAndRefill };
+module.exports = { startFallbackCron, runStartupCheck, checkAndRefill };

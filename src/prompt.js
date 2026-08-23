@@ -1,179 +1,490 @@
-/**
- * src/prompt.js
- * Anti-gravity viral tweet prompt builder.
- * Generates diverse, high-engagement content across multiple formats.
- */
-
 'use strict';
 
-// ── Format templates ────────────────────────────────────────────────────────
+/**
+ * Anti-gravity viral AI/tech post prompt builder.
+ *
+ * Goal:
+ * Generate intelligent, highly shareable X posts that feel
+ * human, original, concise, and thought-provoking.
+ *
+ * Core style:
+ * Strong idea > clever wording > unnecessary technical jargon.
+ */
 
 const FORMATS = [
-  'single punchy tweet (max 280 characters)',
-  'single tweet with a bold opening hook, then 1-2 supporting lines',
-  'numbered Twitter thread (4–6 tweets, each under 270 chars, format: "1/ ... 2/ ...")',
-  'stat-bomb tweet (lead with a surprising statistic, then flip the narrative)',
-  'hot-take / contrarian tweet (challenge a popular belief in your niche)',
-  'story-hook tweet (open with "I discovered..." or "Nobody talks about..." — then deliver)',
-  'listicle tweet ("5 things about X that most people get wrong:")',
-  'A short, punchy single tweet (max 280 chars) with a controversial or surprising technical opinion.',
-  'A technical contrarian hot take that challenges common engineering wisdom or best practices.',
-  'A 3-part micro-thread breaking down a complex architecture, algorithm, or technical concept into simple terms.',
-  'An actionable coding or system design "how-to" formatted as a bulleted list.',
-  'A story-driven tweet starting with a painful debugging session or production failure, ending with a technical lesson.',
-  'A direct, highly technical prediction about the next 5 years of frameworks, tools, or AI in this niche.',
-  'An observation about a hidden engineering anti-pattern nobody is talking about.'
+  'single punchy observation',
+  'contrarian opinion',
+  'future prediction',
+  'unexpected technology insight',
+  'curiosity-driven question',
+  'short narrative / realization',
+  'problem → surprising solution',
+  'old world → new world comparison',
+  'technology timeline / evolution',
+  '“imagine if…” scenario',
+  'myth vs reality',
+  'one powerful idea explained simply',
+  'industry shift observation',
+  'career / skill implication of a technology',
+  'short list with 3–5 items',
+  'counterintuitive technical observation',
+  'technology analogy',
+  '“the real story is…” reframing',
+  'short philosophical observation about technology',
+  'prediction that makes the reader think'
 ];
 
 const TONES = [
-  'highly technical and authoritative',
-  'casual, witty, and slightly sarcastic (like a tired senior engineer)',
-  'urgent and mind-blowing (revealing a powerful technical paradigm)',
-  'analytical, architectural, and reflective',
-  'inspiring and forward-looking for developers',
-  'data-driven, precise, and punchy',
+  'smart, calm, and confident',
+  'curious and thought-provoking',
+  'bold but intellectually honest',
+  'minimalist and punchy',
+  'forward-looking and visionary',
+  'slightly provocative',
+  'conversational and human',
+  'analytical without sounding academic',
+  'surprising and insightful',
+  'witty but not forced'
+];
+
+const HOOK_STYLES = [
+  'Start with a surprising statement.',
+  'Start with a strong contrast between today and the future.',
+  'Start with a sentence that creates an information gap.',
+  'Start with a counterintuitive observation.',
+  'Start with a prediction.',
+  'Start with a simple sentence that becomes more interesting on the next line.',
+  'Start with a “What if…” scenario.',
+  'Start with a statement that challenges a common assumption.',
+  'Start with a short, memorable sentence.',
+  'Start with a realization that sounds obvious only after you read it.'
 ];
 
 /**
- * Randomly pick N items from an array.
+ * Fisher-Yates shuffle.
+ */
+function shuffle(arr) {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/**
+ * Randomly pick N unique items.
  */
 function pickRandom(arr, n = 1) {
-  const shuffled = [...arr].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, n); // Always return an array, even for n=1
+  return shuffle(arr).slice(0, Math.min(n, arr.length));
 }
 
 /**
- * Build the anti-gravity viral tweet generation prompt.
+ * Build the viral AI/tech generation prompt.
  *
  * @param {Object} opts
- * @param {string}   opts.niche         - Main topic niche
- * @param {string[]} opts.subtopics     - Subtopics to draw from
- * @param {string[]} opts.recentTopics  - Recently used topics to avoid
- * @param {number}   opts.count         - Number of posts to generate
- * @returns {string} The full prompt for the Gemini API
+ * @param {string} opts.niche
+ * @param {string[]} opts.subtopics
+ * @param {string[]} opts.recentTopics
+ * @param {number} opts.count
+ * @returns {string}
  */
-function buildPrompt({ niche, subtopics, recentTopics, count = 3 }) {
-  const selectedFormats = pickRandom(FORMATS, Math.min(count, FORMATS.length));
-  const selectedTones = pickRandom(TONES, Math.min(count, TONES.length));
+function buildPrompt({
+  niche,
+  subtopics = [],
+  recentTopics = [],
+  count = 3
+}) {
+  const safeCount = Math.max(1, Math.min(Number(count) || 3, 20));
 
-  const subtopicList = subtopics.length > 0
+  const selectedFormats = pickRandom(FORMATS, safeCount);
+  const selectedTones = pickRandom(TONES, safeCount);
+  const selectedHooks = pickRandom(HOOK_STYLES, safeCount);
+
+  const subtopicList = subtopics.length
     ? subtopics.join(', ')
-    : 'Anything highly relevant, technical, and cutting-edge in this niche.';
+    : 'AI, technology, software, future technology, robotics, computing, consumer tech, developer tools, and emerging technology';
 
-  const avoidSection = recentTopics.length > 0
-    ? `\nCRITICAL: Do NOT write about these recently covered topics:\n- ${recentTopics.join('\n- ')}\n`
+  const avoidSection = recentTopics.length
+    ? `RECENTLY USED TOPICS — AVOID:\n${recentTopics.map(topic => `- ${topic}`).join('\n')}\n\nDo not merely rename these topics.\nAvoid the same underlying idea, angle, prediction, or argument.\n`
     : '';
 
-  return `You are an elite, highly technical viral Twitter ghostwriter and Senior Staff Engineer with a track record of writing technical tweets that get 10,000+ likes and go massively viral. You deeply understand what makes developer content spread: technical depth, surprising architectures, strong opinions on tooling, and raw truth about software engineering.
+  const formatInstructions = selectedFormats
+    .map((format, i) => `Post ${i + 1}: ${format}`)
+    .join('\n');
 
-Your task: Generate exactly ${count} original, high-quality technical tweets for a Twitter account focused on **${niche}**.
+  const toneInstructions = selectedTones
+    .map((tone, i) => `Post ${i + 1}: ${tone}`)
+    .join('\n');
 
-Subtopics to draw inspiration from: ${subtopicList}
+  const hookInstructions = selectedHooks
+    .map((hook, i) => `Post ${i + 1}: ${hook}`)
+    .join('\n');
+
+  return `
+You are an elite X/Twitter writer focused on AI, technology, software, and the future.
+
+Your job is NOT to sound like a marketing bot.
+
+Your job is to make someone stop scrolling because the idea is genuinely interesting.
+
+Generate exactly ${safeCount} original posts for an X account focused on:
+
+${niche}
+
+SUBTOPICS:
+${subtopicList}
+
 ${avoidSection}
 
-━━━━━━━━━━━━━━━━━━━━━━
-STRICT RULES (follow every single one):
-━━━━━━━━━━━━━━━━━━━━━━
-1. Each tweet must feel DIFFERENT in angle, format, and tone.
-2. Open every tweet with an irresistible hook — the first line must make developers STOP scrolling.
-3. Never use generic advice. Be highly specific, technical, counterintuitive, or surprising. Use real technical terminology.
-4. FORMATTING IS KING: Use line breaks strategically. Keep paragraphs to 1-2 sentences. Make code/logic explanations incredibly easy to read on a phone screen.
-5. EMOJIS: Use emojis tastefully to draw attention to key points, lists, or hooks (e.g. 🚀, 💡, 🧠, ⚠️, 🛠️, 💻). NO hashtags.
-6. DRIVE ENGAGEMENT: End at least half of your tweets with a polarizing technical question, a call for engineering opinions, or a prompt that practically forces devs to reply in the comments.
-7. Threads must have a strong "1/" opener. End threads with a question to drive replies.
-8. Think like an elite 10x engineer and the top 1% of technical content creators on X. Be bold, authoritative, polarizing, and relatable to developers.
-9. Make readers feel something: curiosity, surprise, urgency, inspiration, or a mild technical provocation.
-10. DO NOT repeat any topic, angle, or format used in the avoid list above.
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+CORE WRITING PHILOSOPHY
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━━━━━━━━━━━━━━━━━━━━
-FORMAT VARIETY (use one of these per tweet — mix them up):
-━━━━━━━━━━━━━━━━━━━━━━
-${selectedFormats.map((f, i) => `Tweet ${i + 1}: ${f}`).join('\n')}
+Write like a highly intelligent person who happens to understand technology extremely well.
 
-━━━━━━━━━━━━━━━━━━━━━━
-TONE VARIETY:
-━━━━━━━━━━━━━━━━━━━━━━
-${selectedTones.map((t, i) => `Tweet ${i + 1}: ${t}`).join('\n')}
+The reader should feel:
 
-━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT (CRITICAL — follow exactly):
-━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY the tweets. No explanations, no labels, no commentary.
-Separate each tweet with exactly this delimiter on its own line:
+“This is interesting.”
+
+“This made me think.”
+
+“I hadn't looked at it that way.”
+
+Avoid sounding like:
+
+* an AI content generator
+* a motivational speaker
+* a corporate marketing account
+* a LinkedIn influencer
+* a generic tech-news account
+
+IDEAS MATTER MORE THAN BUZZWORDS.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+VIRALITY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. The first line is the most important line.
+
+It must create curiosity, surprise, tension, or a strong opinion.
+
+Weak:
+“AI is changing the world.”
+
+Better:
+“The biggest change AI brings may have nothing to do with chatbots.”
+
+2. Give the reader an actual idea.
+
+Do not write generic statements such as:
+
+“AI is the future.”
+“Technology is evolving rapidly.”
+“Developers should learn AI.”
+“The future is exciting.”
+
+These are empty.
+
+Instead, explain WHAT is changing and WHY it matters.
+
+3. Prefer simple language.
+
+Use technical terminology only when it adds meaning.
+
+The goal is:
+HIGH INTELLIGENCE + LOW FRICTION.
+
+4. Make the post easy to read on a phone.
+
+Use short lines.
+
+Use whitespace.
+
+Avoid giant paragraphs.
+
+5. Do NOT force a question at the end.
+
+Only use a question when it naturally creates discussion.
+
+A strong ending can simply be a powerful final statement.
+
+6. Do not manufacture controversy.
+
+Be provocative because the IDEA is interesting,
+not because you are trying to farm engagement.
+
+7. Avoid clichés.
+
+Do NOT repeatedly use phrases such as:
+
+“game changer”
+“revolutionary”
+“the future is here”
+“this changes everything”
+“10x”
+“mark my words”
+“we're entering a new era”
+“AI won't replace X”
+“people who use AI will replace people who don't”
+
+These are overused.
+
+8. Avoid excessive emojis.
+
+Use zero emojis by default.
+
+If one genuinely improves the post, use at most 1.
+
+9. NEVER use hashtags.
+
+10. Do not invent statistics.
+
+If a post contains a statistic, it must be a widely established fact
+or explicitly framed as an estimate / possibility.
+
+11. Do not pretend speculation is fact.
+
+For predictions, use language such as:
+
+“could”
+“may”
+“might”
+“the interesting possibility is”
+“my bet is”
+
+12. Every post must have a DISTINCT idea.
+
+Do not create five versions of the same AI-agent post.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+POST TYPES
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Use the assigned format for each post.
+
+${formatInstructions}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+TONE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${toneInstructions}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOOK STYLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${hookInstructions}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+IDEA GENERATION PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before writing each post, silently identify:
+
+1. What is the core idea?
+2. Why would someone find it surprising?
+3. What common assumption does it challenge?
+4. What is the simplest way to express it?
+5. What is the strongest final line?
+
+Do NOT output this reasoning.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+HIGH-VALUE ANGLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Look for ideas around:
+
+• AI changing how software is built
+• AI agents becoming useful
+• interfaces disappearing
+• humans working differently with AI
+• robotics becoming practical
+• computing becoming cheaper
+• software becoming easier to create
+• unexpected consequences of new technology
+• skills becoming less valuable / more valuable
+• technology changing business models
+• things that become possible when intelligence becomes cheap
+• differences between today's software and future software
+• hidden implications of new technology
+• developer workflow changes
+• consumer technology people underestimate
+• technologies that sound futuristic but already exist
+• second-order effects
+• “what happens next?” questions
+
+Prefer SECOND-ORDER insights over obvious observations.
+
+Example:
+
+Obvious:
+“AI can write code faster.”
+
+Better:
+“When writing code becomes cheap, knowing WHAT to build becomes more valuable.”
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+STYLE EXAMPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Example 1:
+
+AI chatbots were the first step.
+
+The interesting step is AI that doesn't wait for you to ask a question.
+
+It notices the task.
+Plans the work.
+Uses the tools.
+Finishes it.
+
+That's a very different kind of software.
+
+Example 2:
+
+The most valuable developer skill may change.
+
+If AI makes writing code dramatically cheaper,
+then the bottleneck moves somewhere else:
+
+Knowing what should be built.
+
+Example 3:
+
+Imagine software that doesn't have a settings page.
+
+You just tell it what you want.
+
+The software figures out the configuration.
+
+That sounds strange today.
+
+It may feel completely normal in a few years.
+
+Notice:
+
+* No fake hype
+* No unnecessary emojis
+* No hashtags
+* No forced “10x engineer” language
+* No generic motivational advice
+* Strong ideas
+* Simple language
+* Natural curiosity
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+LENGTH
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For single posts:
+
+Prefer 100–240 characters when the idea is strong enough.
+
+You may use up to 280 characters when necessary.
+
+Do NOT add words simply to reach the character limit.
+
+Shorter is better when shorter is stronger.
+
+For threads:
+
+Maximum 4–6 posts.
+
+Each post must stand on its own while advancing one central idea.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY the posts.
+
+No introduction.
+No explanations.
+No labels such as “Post 1”.
+
+Separate posts using exactly:
+
 ---TWEET---
 
-EVERY tweet MUST include an ---IMAGE_PROMPT--- section. This is NOT optional.
-The image prompt should be a vivid, visual description (10–25 words) that pairs perfectly with the tweet — think cinematic, bold, photorealistic or stylised illustration.
+After the final post, output:
 
-Example output structure:
-[Tweet 1 text here]
----IMAGE_PROMPT---
-[A vivid visual description for the AI image — e.g. "A lone developer surrounded by glowing holographic code at 3am, cyberpunk aesthetic, dramatic lighting"]
----TWEET---
-[Tweet 2 text here]
----IMAGE_PROMPT---
-[A vivid visual description for the AI image]
----TWEET---
-[Tweet 3 text here]
----IMAGE_PROMPT---
-[A vivid visual description for the AI image]
-
-Also, after the last tweet, add one final section:
 ---TOPICS---
-[comma-separated list of the core topics/angles covered in your tweets above, so duplicates can be avoided next time]
 
-Generate exactly ${count} tweets now:`;
+Then provide 2–4 concise topic/angle keywords for each post,
+separated by commas.
+
+Example:
+
+AI agents, software automation, future interfaces, developer workflow
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL QUALITY CHECK
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before returning the answer, silently verify:
+
+✓ Every post has a different idea.
+✓ Every opening line creates curiosity.
+✓ No generic AI filler.
+✓ No fake statistics.
+✓ No unnecessary hashtags.
+✓ No excessive emojis.
+✓ No repeated hooks.
+✓ No repeated arguments.
+✓ The language sounds human.
+✓ The post can be understood quickly on a phone.
+✓ The final line is memorable.
+✓ The output follows the exact delimiter format.
+
+Generate exactly ${safeCount} posts now.
+`;
 }
 
 /**
- * Parse Gemini's raw text response into an array of tweet strings + topics.
+ * Parse Gemini's raw response.
  *
  * @param {string} rawText
- * @returns {{ tweets: string[], topics: string[] }}
+ * @returns {{ tweets: Array<{text: string}>, topics: string[] }}
  */
-function parseResponse(rawText) {
-  const topicsMatch = rawText.match(/---TOPICS---\s*([\s\S]+)$/);
+function parseResponse(rawText = '') {
+  const text = String(rawText).trim();
+
+  const topicsMatch = text.match(/---TOPICS---\s*([\s\S]*)$/i);
+
   const topics = topicsMatch
-    ? topicsMatch[1].trim().split(',').map(t => t.trim()).filter(Boolean)
+    ? topicsMatch[1]
+        .trim()
+        .split(',')
+        .map(topic => topic.trim())
+        .filter(Boolean)
     : [];
 
   const withoutTopics = topicsMatch
-    ? rawText.slice(0, rawText.indexOf('---TOPICS---'))
-    : rawText;
+    ? text.slice(0, topicsMatch.index)
+    : text;
 
   const tweetsRaw = withoutTopics
-    .split('---TWEET---')
-    .map(t => t.trim())
-    .filter(t => t.length > 0);
+    .split(/---TWEET---/i)
+    .map(tweet => tweet.trim())
+    .filter(Boolean);
 
-  const tweets = tweetsRaw.map(t => {
-    if (t.includes('---IMAGE_PROMPT---')) {
-      const parts = t.split('---IMAGE_PROMPT---');
-      return {
-        text: parts[0].trim(),
-        imagePrompt: parts[1].trim()
-      };
-    }
-    // Fallback: model skipped the image prompt — derive one from the tweet text
-    const fallbackPrompt = _buildFallbackImagePrompt(t);
-    return { text: t, imagePrompt: fallbackPrompt };
+  const tweets = tweetsRaw.map(tweet => {
+    return {
+      text: tweet
+    };
   });
 
-  return { tweets, topics };
+  return {
+    tweets,
+    topics
+  };
 }
 
-/**
- * Build a simple fallback image prompt from the first line of tweet text
- * so that every post always has an image even when the model disobeys.
- * @private
- * @param {string} tweetText
- * @returns {string}
- */
-function _buildFallbackImagePrompt(tweetText) {
-  // Use the first sentence / line (max 120 chars) as the image concept
-  const firstLine = tweetText.split('\n')[0].replace(/\d+\/\s*/, '').trim();
-  const concept = firstLine.length > 120 ? firstLine.slice(0, 120) : firstLine;
-  return `Cinematic illustration representing: ${concept}. Dramatic lighting, high detail, bold composition.`;
-}
-
-module.exports = { buildPrompt, parseResponse, pickRandom };
+module.exports = {
+  buildPrompt,
+  parseResponse,
+  pickRandom
+};
