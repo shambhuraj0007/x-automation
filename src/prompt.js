@@ -35,7 +35,7 @@ const TONES = [
  */
 function pickRandom(arr, n = 1) {
   const shuffled = [...arr].sort(() => Math.random() - 0.5);
-  return n === 1 ? shuffled[0] : shuffled.slice(0, n);
+  return shuffled.slice(0, n); // Always return an array, even for n=1
 }
 
 /**
@@ -98,14 +98,21 @@ Return ONLY the tweets. No explanations, no labels, no commentary.
 Separate each tweet with exactly this delimiter on its own line:
 ---TWEET---
 
+EVERY tweet MUST include an ---IMAGE_PROMPT--- section. This is NOT optional.
+The image prompt should be a vivid, visual description (10–25 words) that pairs perfectly with the tweet — think cinematic, bold, photorealistic or stylised illustration.
+
 Example output structure:
 [Tweet 1 text here]
 ---IMAGE_PROMPT---
-[Optional: A short prompt to generate an AI image for this tweet (e.g. "A futuristic neon city"). Leave this out completely if the tweet doesn't need an image.]
+[A vivid visual description for the AI image — e.g. "A lone developer surrounded by glowing holographic code at 3am, cyberpunk aesthetic, dramatic lighting"]
 ---TWEET---
 [Tweet 2 text here]
+---IMAGE_PROMPT---
+[A vivid visual description for the AI image]
 ---TWEET---
 [Tweet 3 text here]
+---IMAGE_PROMPT---
+[A vivid visual description for the AI image]
 
 Also, after the last tweet, add one final section:
 ---TOPICS---
@@ -143,10 +150,26 @@ function parseResponse(rawText) {
         imagePrompt: parts[1].trim()
       };
     }
-    return { text: t };
+    // Fallback: model skipped the image prompt — derive one from the tweet text
+    const fallbackPrompt = _buildFallbackImagePrompt(t);
+    return { text: t, imagePrompt: fallbackPrompt };
   });
 
   return { tweets, topics };
+}
+
+/**
+ * Build a simple fallback image prompt from the first line of tweet text
+ * so that every post always has an image even when the model disobeys.
+ * @private
+ * @param {string} tweetText
+ * @returns {string}
+ */
+function _buildFallbackImagePrompt(tweetText) {
+  // Use the first sentence / line (max 120 chars) as the image concept
+  const firstLine = tweetText.split('\n')[0].replace(/\d+\/\s*/, '').trim();
+  const concept = firstLine.length > 120 ? firstLine.slice(0, 120) : firstLine;
+  return `Cinematic illustration representing: ${concept}. Dramatic lighting, high detail, bold composition.`;
 }
 
 module.exports = { buildPrompt, parseResponse, pickRandom };

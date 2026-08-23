@@ -38,11 +38,12 @@ jobs:
           MIN_SPACING_MINUTES: ${{ secrets.MIN_SPACING_MINUTES }}
           MAX_SPACING_MINUTES: ${{ secrets.MAX_SPACING_MINUTES }}
           TOPIC_MEMORY_DAYS: ${{ secrets.TOPIC_MEMORY_DAYS }}
+          HF_API_KEY: ${{ secrets.HF_API_KEY }}
           DRY_RUN: 'false'
         run: node run-action.js
 
       - name: Commit Memory File
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: update topics registry [skip ci]"
-          file_pattern: 'data/topics.json'
+          commit_message: "chore: update topics registry and images [skip ci]"
+          file_pattern: 'data/topics.json data/images/'

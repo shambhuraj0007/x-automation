@@ -15,6 +15,7 @@
 const axios = require('axios');
 const pRetry = require('p-retry').default;
 const logger = require('./logger');
+const { generateImage } = require('./imageGen');
 
 const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
 
@@ -236,10 +237,14 @@ async function schedulePosts(posts) {
  */
 async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
   let assetsField = '';
-  if (postObj.imagePrompt) {
-    // Generate an AI image URL via Pollinations AI (free, no-auth, dynamic generation)
-    const encodedPrompt = encodeURIComponent(postObj.imagePrompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`;
+
+  // Use a pre-resolved URL if available, otherwise generate now
+  let imageUrl = postObj.imageUrl;
+  if (imageUrl === undefined && postObj.imagePrompt) {
+    imageUrl = await generateImage(postObj.imagePrompt);
+  }
+
+  if (imageUrl) {
     assetsField = `
             assets: [
               {
@@ -249,6 +254,8 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
               }
             ]
     `;
+  } else if (postObj.imagePrompt) {
+    logger.warn(`Buffer: image generation failed for post ${index} — posting text only`);
   }
 
   await pRetry(

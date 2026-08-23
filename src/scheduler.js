@@ -49,6 +49,9 @@ async function checkAndRefill({ threshold, reason }) {
   }
 }
 
+const { execSync } = require('child_process');
+const { generateImage } = require('./imageGen');
+
 /**
  * Unconditionally generate and schedule a fresh batch of posts.
  * @private
@@ -61,6 +64,35 @@ async function _doRefill(reason) {
     logger.info(`Scheduler [${reason}]: 🚀 Refilling queue with ${batchSize} new posts...`);
 
     const posts = await generatePosts({ count: batchSize });
+
+    // Step 2: Pre-generate images
+    let hasNewImages = false;
+    for (const post of posts) {
+      if (post.imagePrompt) {
+        post.imageUrl = await generateImage(post.imagePrompt);
+        if (post.imageUrl) {
+          hasNewImages = true;
+        }
+      }
+    }
+
+    // Step 3: Push images to GitHub so Buffer can access the public raw URLs
+    if (hasNewImages && process.env.GITHUB_ACTIONS === 'true') {
+      logger.info('Scheduler: pushing images to GitHub...');
+      try {
+        execSync('git config --global user.name "github-actions[bot]"');
+        execSync('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
+        execSync('git add data/images/');
+        execSync('git commit -m "chore: push generated images [skip ci]"');
+        execSync('git push');
+        logger.info('Scheduler: images pushed successfully.');
+        // Wait a few seconds for GitHub CDN to reflect
+        await new Promise(res => setTimeout(res, 5000));
+      } catch (err) {
+        logger.warn(`Scheduler: failed to push images to GitHub (or nothing to commit) — ${err.message}`);
+      }
+    }
+
     await schedulePosts(posts);
 
     logger.info(`Scheduler [${reason}]: ✅ Refill complete — ${posts.length} post(s) added to Buffer`);

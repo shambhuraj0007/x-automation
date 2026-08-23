@@ -1,0 +1,36 @@
+name: Clean Old Images
+
+on:
+  schedule:
+    - cron: '0 3 1,11,21 * *'  # Runs every ~10 days (1st, 11th, 21st at 03:00 UTC)
+  workflow_dispatch:             # Manual trigger from GitHub UI
+
+jobs:
+  clean-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Delete images older than 10 days
+        env:
+          RETENTION_DAYS: '10'
+        run: node src/cleanImages.js
+
+      - name: Commit deleted images
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: clean images older than 10 days [skip ci]"
+          file_pattern: 'data/images/'
