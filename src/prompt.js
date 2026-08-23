@@ -16,18 +16,22 @@ const FORMATS = [
   'hot-take / contrarian tweet (challenge a popular belief in your niche)',
   'story-hook tweet (open with "I discovered..." or "Nobody talks about..." — then deliver)',
   'listicle tweet ("5 things about X that most people get wrong:")',
-  'quote-style insight tweet (wisdom-forward, share-worthy)',
-  'prediction tweet ("In 3 years..." or "By 2030...")',
-  'behind-the-scenes or raw truth tweet (vulnerable, relatable)',
+  'A short, punchy single tweet (max 280 chars) with a controversial or surprising technical opinion.',
+  'A technical contrarian hot take that challenges common engineering wisdom or best practices.',
+  'A 3-part micro-thread breaking down a complex architecture, algorithm, or technical concept into simple terms.',
+  'An actionable coding or system design "how-to" formatted as a bulleted list.',
+  'A story-driven tweet starting with a painful debugging session or production failure, ending with a technical lesson.',
+  'A direct, highly technical prediction about the next 5 years of frameworks, tools, or AI in this niche.',
+  'An observation about a hidden engineering anti-pattern nobody is talking about.'
 ];
 
 const TONES = [
-  'bold and confident',
-  'curious and thought-provoking',
-  'urgent and eye-opening',
-  'wry and slightly contrarian',
-  'inspiring and forward-looking',
-  'data-driven but punchy',
+  'highly technical and authoritative',
+  'casual, witty, and slightly sarcastic (like a tired senior engineer)',
+  'urgent and mind-blowing (revealing a powerful technical paradigm)',
+  'analytical, architectural, and reflective',
+  'inspiring and forward-looking for developers',
+  'data-driven, precise, and punchy',
 ];
 
 /**
@@ -46,7 +50,7 @@ function pickRandom(arr, n = 1) {
  * @param {string[]} opts.subtopics     - Subtopics to draw from
  * @param {string[]} opts.recentTopics  - Recently used topics to avoid
  * @param {number}   opts.count         - Number of posts to generate
- * @returns {string} The full prompt string
+ * @returns {string} The full prompt for the Gemini API
  */
 function buildPrompt({ niche, subtopics, recentTopics, count = 3 }) {
   const selectedFormats = pickRandom(FORMATS, Math.min(count, FORMATS.length));
@@ -54,15 +58,15 @@ function buildPrompt({ niche, subtopics, recentTopics, count = 3 }) {
 
   const subtopicList = subtopics.length > 0
     ? subtopics.join(', ')
-    : niche;
+    : 'Anything highly relevant, technical, and cutting-edge in this niche.';
 
   const avoidSection = recentTopics.length > 0
-    ? `\n⛔ AVOID these recently used topics/angles (do NOT repeat them):\n${recentTopics.slice(-20).map(t => `  - ${t}`).join('\n')}`
+    ? `\nCRITICAL: Do NOT write about these recently covered topics:\n- ${recentTopics.join('\n- ')}\n`
     : '';
 
-  return `You are an elite viral Twitter ghostwriter with a track record of writing tweets that get 10,000+ likes and go massively viral. You deeply understand what makes content spread: emotion, surprise, novelty, controversy, and raw truth.
+  return `You are an elite, highly technical viral Twitter ghostwriter and Senior Staff Engineer with a track record of writing technical tweets that get 10,000+ likes and go massively viral. You deeply understand what makes developer content spread: technical depth, surprising architectures, strong opinions on tooling, and raw truth about software engineering.
 
-Your task: Generate exactly ${count} original, high-quality tweets for a Twitter account focused on **${niche}**.
+Your task: Generate exactly ${count} original, high-quality technical tweets for a Twitter account focused on **${niche}**.
 
 Subtopics to draw inspiration from: ${subtopicList}
 ${avoidSection}
@@ -71,14 +75,14 @@ ${avoidSection}
 STRICT RULES (follow every single one):
 ━━━━━━━━━━━━━━━━━━━━━━
 1. Each tweet must feel DIFFERENT in angle, format, and tone.
-2. Open every tweet with an irresistible hook — the first line must make people STOP scrolling.
-3. Never use generic advice. Be specific, counterintuitive, or surprising.
-4. FORMATTING IS KING: Use line breaks strategically. Keep paragraphs to 1-2 sentences. Make it incredibly easy to read on a phone screen.
-5. EMOJIS: Use emojis tastefully to draw attention to key points, lists, or hooks (e.g. 🚀, 💡, 🧠, ⚠️). NO hashtags.
-6. DRIVE ENGAGEMENT: End at least half of your tweets with a polarizing question, a call for opinions, or a prompt that practically forces people to reply in the comments.
+2. Open every tweet with an irresistible hook — the first line must make developers STOP scrolling.
+3. Never use generic advice. Be highly specific, technical, counterintuitive, or surprising. Use real technical terminology.
+4. FORMATTING IS KING: Use line breaks strategically. Keep paragraphs to 1-2 sentences. Make code/logic explanations incredibly easy to read on a phone screen.
+5. EMOJIS: Use emojis tastefully to draw attention to key points, lists, or hooks (e.g. 🚀, 💡, 🧠, ⚠️, 🛠️, 💻). NO hashtags.
+6. DRIVE ENGAGEMENT: End at least half of your tweets with a polarizing technical question, a call for engineering opinions, or a prompt that practically forces devs to reply in the comments.
 7. Threads must have a strong "1/" opener. End threads with a question to drive replies.
-8. Think like the top 1% of content creators on X. Be bold, authoritative, polarizing, and relatable.
-9. Make readers feel something: curiosity, surprise, urgency, inspiration, or a mild provocation.
+8. Think like an elite 10x engineer and the top 1% of technical content creators on X. Be bold, authoritative, polarizing, and relatable to developers.
+9. Make readers feel something: curiosity, surprise, urgency, inspiration, or a mild technical provocation.
 10. DO NOT repeat any topic, angle, or format used in the avoid list above.
 
 ━━━━━━━━━━━━━━━━━━━━━━
