@@ -2,7 +2,7 @@ name: Twitter Automation Bot
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # Runs every 2 hours
+    - cron: '0 */4 * * *' # Runs every 4 hours
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 jobs:
