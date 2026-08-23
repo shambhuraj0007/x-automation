@@ -224,7 +224,11 @@ async function schedulePosts(posts) {
         (postObj.imagePrompt ? `\n[IMAGE PROMPT: ${postObj.imagePrompt}]` : '')
       );
     } else {
-      await _scheduleOne(channelId, postObj, scheduledAt, i + 1, posts.length);
+      try {
+        await _scheduleOne(channelId, postObj, scheduledAt, i + 1, posts.length);
+      } catch (err) {
+        logger.error(`Buffer: failed to schedule post ${i + 1}/${posts.length} — ${err.message}`);
+      }
     }
 
     baseTime = scheduledAt;

@@ -54,30 +54,19 @@ async function generatePosts({ count = 3 } = {}) {
     }
   );
 
-  // Filter out any duplicates
-  const fresh = tweets.filter(tweet => {
-    // Extract rough topic from first line for duplicate checking
-    const firstLine = tweet.text.split('\n')[0].slice(0, 80);
-    if (topicRegistry.isDuplicate(firstLine)) {
-      logger.debug(`Gemini: filtered duplicate tweet starting with: "${firstLine.slice(0, 50)}..."`);
-      return false;
-    }
-    return true;
-  });
-
-  if (fresh.length === 0) {
-    throw new Error('Gemini: all generated posts were duplicates — retrying on next cycle');
+  if (tweets.length === 0) {
+    throw new Error('Gemini: no posts were generated — retrying on next cycle');
   }
 
-  if (fresh.length < count) {
-    logger.warn(`Gemini: ${count - fresh.length} post(s) filtered as duplicates. Proceeding with ${fresh.length}.`);
+  if (tweets.length < count) {
+    logger.warn(`Gemini: ${count - tweets.length} post(s) less than requested were generated. Proceeding with ${tweets.length}.`);
   }
 
   // Register topics so future runs avoid them
   topicRegistry.register(topics);
 
-  logger.info(`Gemini: successfully generated ${fresh.length} fresh post(s)`);
-  return fresh;
+  logger.info(`Gemini: successfully generated ${tweets.length} post(s)`);
+  return tweets;
 }
 
 /**
