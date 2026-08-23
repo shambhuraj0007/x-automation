@@ -73,11 +73,11 @@ STRICT RULES (follow every single one):
 1. Each tweet must feel DIFFERENT in angle, format, and tone.
 2. Open every tweet with an irresistible hook — the first line must make people STOP scrolling.
 3. Never use generic advice. Be specific, counterintuitive, or surprising.
-4. Use plain language. Short sentences. Active voice. Zero corporate fluff.
-5. Do NOT use hashtags. Do NOT use emojis (unless one is powerful in context).
-6. Each tweet must have a clear point of view — no wishy-washy opinions.
-7. Threads must have a strong "1/" opener and deliver real value in every tweet.
-8. Each tweet must feel like it was written by a real human expert, not a bot.
+4. FORMATTING IS KING: Use line breaks strategically. Keep paragraphs to 1-2 sentences. Make it incredibly easy to read on a phone screen.
+5. EMOJIS: Use emojis tastefully to draw attention to key points, lists, or hooks (e.g. 🚀, 💡, 🧠, ⚠️). NO hashtags.
+6. DRIVE ENGAGEMENT: End at least half of your tweets with a polarizing question, a call for opinions, or a prompt that practically forces people to reply in the comments.
+7. Threads must have a strong "1/" opener. End threads with a question to drive replies.
+8. Think like the top 1% of content creators on X. Be bold, authoritative, polarizing, and relatable.
 9. Make readers feel something: curiosity, surprise, urgency, inspiration, or a mild provocation.
 10. DO NOT repeat any topic, angle, or format used in the avoid list above.
 
