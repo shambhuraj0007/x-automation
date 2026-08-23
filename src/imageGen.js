@@ -49,10 +49,6 @@ async function generateImage(prompt) {
   const repo  = process.env.GITHUB_REPOSITORY;  // e.g. "shambhuraj0007/x-automation"
   const branch = process.env.GITHUB_REF_NAME || 'main';
 
-  if (!hfKey) {
-    logger.warn('imageGen: HF_API_KEY not set — skipping image generation');
-    return null;
-  }
   if (!repo) {
     logger.warn('imageGen: GITHUB_REPOSITORY not set — skipping image generation (set it in .env for local runs)');
     return null;
@@ -62,24 +58,33 @@ async function generateImage(prompt) {
     logger.info(`imageGen: generating SDXL image for: "${prompt.slice(0, 80)}..."`);
 
     let imageBuffer;
-    try {
-      imageBuffer = await pRetry(
-        () => _callHuggingFace(prompt, hfKey),
-        {
-          retries: 3,
-          minTimeout: 8000,
-          maxTimeout: 30000,
-          factor: 2,
-          onFailedAttempt: (err) => {
-            logger.warn(
-              `imageGen: HF attempt ${err.attemptNumber} failed. ` +
-              `${err.retriesLeft} retries left — ${err.message}`
-            );
-          },
-        }
-      );
-    } catch (hfErr) {
-      logger.warn(`imageGen: HuggingFace failed entirely (${hfErr.message}). Falling back to Pollinations...`);
+    
+    if (hfKey) {
+      try {
+        imageBuffer = await pRetry(
+          () => _callHuggingFace(prompt, hfKey),
+          {
+            retries: 3,
+            minTimeout: 8000,
+            maxTimeout: 30000,
+            factor: 2,
+            onFailedAttempt: (err) => {
+              logger.warn(
+                `imageGen: HF attempt ${err.attemptNumber} failed. ` +
+                `${err.retriesLeft} retries left — ${err.message}`
+              );
+            },
+          }
+        );
+      } catch (hfErr) {
+        logger.warn(`imageGen: HuggingFace failed entirely (${hfErr.message}). Falling back to Pollinations...`);
+      }
+    } else {
+      logger.info('imageGen: HF_API_KEY not set — using Pollinations as primary image generator');
+    }
+
+    // If HF failed or was skipped due to missing key, use Pollinations
+    if (!imageBuffer) {
       imageBuffer = await pRetry(
         () => _callPollinations(prompt),
         {
