@@ -1,0 +1,48 @@
+name: Twitter Automation Bot
+
+on:
+  schedule:
+    - cron: '0 */2 * * *' # Runs every 2 hours
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to commit data/topics.json back to the repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Automation Bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_ORG_ID: ${{ secrets.BUFFER_ORG_ID }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          TWEET_NICHE: ${{ secrets.TWEET_NICHE }}
+          POSTS_PER_BATCH: ${{ secrets.POSTS_PER_BATCH }}
+          QUEUE_REFILL_THRESHOLD: ${{ secrets.QUEUE_REFILL_THRESHOLD }}
+          QUEUE_SOFT_THRESHOLD: ${{ secrets.QUEUE_SOFT_THRESHOLD }}
+          MIN_SPACING_MINUTES: ${{ secrets.MIN_SPACING_MINUTES }}
+          MAX_SPACING_MINUTES: ${{ secrets.MAX_SPACING_MINUTES }}
+          TOPIC_MEMORY_DAYS: ${{ secrets.TOPIC_MEMORY_DAYS }}
+          DRY_RUN: 'false'
+        run: node run-action.js
+
+      - name: Commit Memory File
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update topics registry [skip ci]"
+          file_pattern: 'data/topics.json'

@@ -6,7 +6,6 @@ node_modules/
 
 # Runtime data
 logs/
-data/topics.json
 
 # OS
 .DS_Store
