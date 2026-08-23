@@ -367,7 +367,8 @@ It may feel completely normal in a few years.
 Notice:
 
 * No fake hype
-* No unnecessary emojis
+* Use emojis naturally to add visual flair 🚀
+* End posts with a question to drive engagement 👇
 * No hashtags
 * No forced “10x engineer” language
 * No generic motivational advice
@@ -431,12 +432,13 @@ Before returning the answer, silently verify:
 ✓ No generic AI filler.
 ✓ No fake statistics.
 ✓ No unnecessary hashtags.
-✓ No excessive emojis.
+✓ Emojis are used effectively to make the post visually engaging.
 ✓ No repeated hooks.
 ✓ No repeated arguments.
 ✓ The language sounds human.
 ✓ The post can be understood quickly on a phone.
 ✓ The final line is memorable.
+✓ The post ends with an engaging question or interactive prompt.
 ✓ The output follows the exact delimiter format.
 
 Generate exactly ${safeCount} posts now.
