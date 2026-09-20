@@ -13,7 +13,7 @@
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getQueueCount } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount } = require('./buffer');
 const postQueue = require('./postQueue');
 const { schedulePostToBuffer } = require('./api');
 
@@ -41,8 +41,8 @@ function skipBlackout(date) {
  * Calculate the next posting time with random spacing, skipping 2–6 AM.
  */
 function nextPostTime(baseTime, minSpacingMin, maxSpacingMin) {
-  const minMs = (minSpacingMin || 45) * 60 * 1000;
-  const maxMs = (maxSpacingMin || 80) * 60 * 1000;
+  const minMs = (minSpacingMin || 60) * 60 * 1000;
+  const maxMs = (maxSpacingMin || 90) * 60 * 1000;
   const offset = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
 
   let next = new Date(baseTime.getTime() + offset);
@@ -64,9 +64,11 @@ async function autoFillQueue() {
   isRefilling = true;
 
   try {
-    // 1. Check current Buffer queue count
-    const currentCount = await getQueueCount();
-    logger.info(`AutoFill: Buffer queue has ${currentCount} post(s)`);
+    // 1. Check current Buffer queue count and last scheduled time
+    const bufferInfo = await getBufferQueueInfo();
+    const currentCount = bufferInfo.count;
+    const lastScheduledAt = bufferInfo.lastScheduledAt;
+    logger.info(`AutoFill: Buffer queue has ${currentCount} post(s). Last scheduled at: ${lastScheduledAt || 'none'}`);
 
     if (currentCount >= postQueue.BUFFER_MAX_QUEUE) {
       logger.info(`AutoFill: queue is full (${currentCount}/${postQueue.BUFFER_MAX_QUEUE}) — no refill needed`);
@@ -88,9 +90,18 @@ async function autoFillQueue() {
     logger.info(`AutoFill: scheduling ${toSchedule.length} post(s) from local queue`);
 
     // 4. Calculate posting times
-    const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '45', 10);
-    const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '80', 10);
-    let baseTime = skipBlackout(new Date());
+    const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
+    const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
+
+    // If Buffer has existing scheduled posts, start scheduling AFTER the last post in queue
+    let baseTime;
+    if (lastScheduledAt && new Date(lastScheduledAt) > new Date()) {
+      baseTime = skipBlackout(new Date(lastScheduledAt));
+      logger.info(`AutoFill: continuing schedule AFTER last post in Buffer: ${baseTime.toISOString()}`);
+    } else {
+      baseTime = skipBlackout(new Date());
+      logger.info(`AutoFill: queue was empty or last post passed — starting schedule from now: ${baseTime.toISOString()}`);
+    }
 
     const dryRun = process.env.DRY_RUN === 'true';
     const axios = require('axios');

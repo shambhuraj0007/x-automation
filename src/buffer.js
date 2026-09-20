@@ -129,8 +129,8 @@ function randomMinutes(min, max) {
  * Given a base Date, add a random 45–120 minute offset.
  */
 function nextScheduledTime(base) {
-  const minMins = parseInt(process.env.MIN_SPACING_MINUTES || '45', 10);
-  const maxMins = parseInt(process.env.MAX_SPACING_MINUTES || '120', 10);
+  const minMins = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
+  const maxMins = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
   const offset = randomMinutes(minMins, maxMins) * 60 * 1000;
   return new Date(base.getTime() + offset);
 }
@@ -138,12 +138,14 @@ function nextScheduledTime(base) {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Fetch the number of scheduled (pending) posts in the Buffer queue
- * for the configured channel.
+ * Fetch scheduled posts info from Buffer:
+ * - count: total number of scheduled posts
+ * - lastScheduledAt: ISO string of the post scheduled furthest out in time (or null)
+ * - posts: array of { id, dueAt, text, status }
  *
- * @returns {Promise<number>}
+ * @returns {Promise<{count: number, lastScheduledAt: string|null, posts: Array}>}
  */
-async function getQueueCount() {
+async function getBufferQueueInfo() {
   const orgId = process.env.BUFFER_ORG_ID;
   const channelId = process.env.BUFFER_CHANNEL_ID;
 
@@ -169,33 +171,54 @@ async function getQueueCount() {
             }
           ) {
             edges {
-              node { id }
-            }
-            pageInfo {
-              hasNextPage
+              node {
+                id
+                dueAt
+                status
+                text
+              }
             }
           }
         }
       `);
 
       const edges = data.posts?.edges ?? [];
-      const count = edges.length;
-      const hasMore = data.posts?.pageInfo?.hasNextPage;
+      const scheduledPosts = edges.map(e => e.node).filter(n => n.dueAt);
 
-      // If there are more than 100 posts queued, that's definitely enough
-      const effective = hasMore ? count + 1 : count;
-      logger.debug(`Buffer: scheduled queue count = ${effective}${hasMore ? '+' : ''}`);
-      return effective;
+      // Sort by dueAt ascending (furthest in future is last)
+      scheduledPosts.sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
+
+      const count = scheduledPosts.length;
+      const lastPost = count > 0 ? scheduledPosts[count - 1] : null;
+
+      logger.debug(`Buffer: ${count} scheduled post(s). Last scheduled at: ${lastPost?.dueAt || 'none'}`);
+
+      return {
+        count,
+        lastScheduledAt: lastPost ? lastPost.dueAt : null,
+        posts: scheduledPosts,
+      };
     },
     {
       retries: 3,
       minTimeout: 2000,
       factor: 2,
       onFailedAttempt: (err) => {
-        logger.warn(`Buffer getQueueCount attempt ${err.attemptNumber} failed: ${err.message}`);
+        logger.warn(`Buffer getBufferQueueInfo attempt ${err.attemptNumber} failed: ${err.message}`);
       },
     }
   );
+}
+
+/**
+ * Fetch the number of scheduled (pending) posts in the Buffer queue
+ * for the configured channel.
+ *
+ * @returns {Promise<number>}
+ */
+async function getQueueCount() {
+  const info = await getBufferQueueInfo();
+  return info.count;
 }
 
 /**
@@ -315,4 +338,4 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
   );
 }
 
-module.exports = { getQueueCount, schedulePosts, nextScheduledTime, discoverIds };
+module.exports = { getBufferQueueInfo, getQueueCount, schedulePosts, nextScheduledTime, discoverIds };

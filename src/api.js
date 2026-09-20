@@ -17,7 +17,7 @@
 
 const express = require('express');
 const logger = require('./logger');
-const { getQueueCount } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount } = require('./buffer');
 const postQueue = require('./postQueue');
 
 const router = express.Router();
@@ -148,10 +148,13 @@ router.post('/schedule', async (req, res) => {
 
     // 3. Check current Buffer queue to know how many slots are available
     let currentBufferCount = 0;
+    let lastScheduledAt = null;
     try {
-      currentBufferCount = await getQueueCount();
+      const bufferInfo = await getBufferQueueInfo();
+      currentBufferCount = bufferInfo.count;
+      lastScheduledAt = bufferInfo.lastScheduledAt;
     } catch (err) {
-      logger.warn(`API: could not check Buffer queue count — ${err.message}. Assuming 0.`);
+      logger.warn(`API: could not check Buffer queue info — ${err.message}. Assuming 0.`);
     }
 
     const availableSlots = Math.max(0, postQueue.BUFFER_MAX_QUEUE - currentBufferCount);
@@ -159,7 +162,7 @@ router.post('/schedule', async (req, res) => {
     const queuedForLater = cleanedPosts.length - toScheduleNow.length;
 
     logger.info(
-      `API: Buffer has ${currentBufferCount} posts. ` +
+      `API: Buffer has ${currentBufferCount}/10 posts (last at ${lastScheduledAt || 'none'}). ` +
       `Scheduling ${toScheduleNow.length} now, ${queuedForLater} queued for auto-fill.`
     );
 
@@ -250,12 +253,28 @@ router.post('/schedule', async (req, res) => {
 
 router.get('/queue', async (req, res) => {
   try {
-    const count = await getQueueCount();
+    const info = await getBufferQueueInfo();
     const stats = postQueue.getStats();
-    res.json({ count, localQueue: stats });
+    const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
+    const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
+
+    res.json({
+      count: info.count,
+      lastScheduledAt: info.lastScheduledAt,
+      minSpacing,
+      maxSpacing,
+      localQueue: stats,
+    });
   } catch (err) {
     logger.error(`API: /queue error — ${err.message}`);
-    res.json({ count: null, localQueue: postQueue.getStats(), error: err.message });
+    res.json({
+      count: null,
+      lastScheduledAt: null,
+      minSpacing: 60,
+      maxSpacing: 90,
+      localQueue: postQueue.getStats(),
+      error: err.message,
+    });
   }
 });
 

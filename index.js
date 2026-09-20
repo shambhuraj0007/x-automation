@@ -38,7 +38,7 @@ function printBanner() {
   logger.info('═══════════════════════════════════════════════════');
   logger.info('  🐦 Post Scheduler Dashboard — Starting Up');
   logger.info(`  Port       : ${PORT}`);
-  logger.info(`  Spacing    : ${process.env.MIN_SPACING_MINUTES || 45}–${process.env.MAX_SPACING_MINUTES || 80} min`);
+  logger.info(`  Spacing    : ${process.env.MIN_SPACING_MINUTES || 60}–${process.env.MAX_SPACING_MINUTES || 90} min`);
   logger.info(`  Buffer max : 10 posts`);
   logger.info(`  Blackout   : 2:00 AM – 6:00 AM (no posting)`);
   logger.info(`  Auto-fill  : every 4 hours`);

@@ -15,6 +15,8 @@
 // ── State ─────────────────────────────────────────────────────────────────
 let posts = [];           // Array of { id, text, status, scheduledAt, error? }
 let isScheduling = false;
+let lastBufferScheduledAt = null; // ISO string of furthest scheduled post in Buffer
+let userManuallySetStartTime = false;
 
 // ── DOM Elements ──────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -42,11 +44,12 @@ const toastContainer  = $('#toast-container');
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Set default start time to now + 45 min
+  // Initial fallback start time
   const now = new Date();
-  now.setMinutes(now.getMinutes() + 45);
-  inputStartTime.value = toLocalDateTimeString(now);
+  now.setMinutes(now.getMinutes() + 60);
+  inputStartTime.value = toLocalDateTimeString(skipBlackout(now));
 
+  // Query Buffer queue and last scheduled post time
   fetchQueueCount();
 
   // Event listeners
@@ -58,12 +61,22 @@ document.addEventListener('DOMContentLoaded', () => {
   btnSchedule.addEventListener('click', scheduleAll);
 
   // Recalculate times when spacing or start time changes
-  inputMinSpacing.addEventListener('change', recalculateTimes);
-  inputMaxSpacing.addEventListener('change', recalculateTimes);
-  inputStartTime.addEventListener('change', recalculateTimes);
-  inputMinSpacing.addEventListener('input', recalculateTimes);
-  inputMaxSpacing.addEventListener('input', recalculateTimes);
-  inputStartTime.addEventListener('input', recalculateTimes);
+  inputMinSpacing.addEventListener('input', () => {
+    inputMinSpacing.dataset.userEdited = 'true';
+    recalculateTimes();
+  });
+  inputMaxSpacing.addEventListener('input', () => {
+    inputMaxSpacing.dataset.userEdited = 'true';
+    recalculateTimes();
+  });
+  inputStartTime.addEventListener('input', () => {
+    userManuallySetStartTime = true;
+    recalculateTimes();
+  });
+  inputStartTime.addEventListener('change', () => {
+    userManuallySetStartTime = true;
+    recalculateTimes();
+  });
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -140,15 +153,56 @@ function skipBlackout(date) {
 // ── Time Calculation ──────────────────────────────────────────────────────
 
 /**
+ * Update the default start time:
+ * If Buffer has posts in queue, start AFTER the furthest/last scheduled post in queue + minSpacing.
+ * Otherwise start from now + minSpacing.
+ * Skips the 2 AM - 6 AM blackout window.
+ */
+function updateStartTimeDefault() {
+  if (userManuallySetStartTime) return;
+
+  const minSpacing = parseInt(inputMinSpacing.value) || 60;
+  let baseDate;
+
+  if (lastBufferScheduledAt && new Date(lastBufferScheduledAt) > new Date()) {
+    const lastDate = new Date(lastBufferScheduledAt);
+    baseDate = new Date(lastDate.getTime() + (minSpacing * 60 * 1000));
+    baseDate = skipBlackout(baseDate);
+
+    const label = $('#label-start-time');
+    if (label) {
+      label.title = `Buffer has posts queued until ${formatDateTime(lastDate)}. New posts start after it.`;
+      const currentInQueue = queueCount.textContent.split('/')[0] || '';
+      label.innerHTML = `Start After <span style="font-size:0.68rem;color:#38bdf8;font-weight:500;">(after #${currentInQueue} in queue)</span>`;
+    }
+  } else {
+    const now = new Date();
+    baseDate = new Date(now.getTime() + (minSpacing * 60 * 1000));
+    baseDate = skipBlackout(baseDate);
+
+    const label = $('#label-start-time');
+    if (label) {
+      label.innerHTML = `Start After`;
+    }
+  }
+
+  inputStartTime.value = toLocalDateTimeString(baseDate);
+}
+
+/**
  * Calculate posting times for all posts based on spacing and start time.
- * Uses random spacing between min and max. Skips 2 AM – 6 AM blackout window.
+ * Uses random spacing between min and max (default 60–90 min). Skips 2 AM – 6 AM blackout window.
  * The times are stored on each post object so they can be sent to the backend.
  */
 function calculatePostingTimes() {
-  const minSpacing = parseInt(inputMinSpacing.value) || 45;
-  const maxSpacing = parseInt(inputMaxSpacing.value) || 80;
-  const startTime = inputStartTime.value ? new Date(inputStartTime.value) : new Date();
+  const minSpacing = parseInt(inputMinSpacing.value) || 60;
+  const maxSpacing = parseInt(inputMaxSpacing.value) || 90;
 
+  if (!inputStartTime.value) {
+    updateStartTimeDefault();
+  }
+
+  const startTime = inputStartTime.value ? new Date(inputStartTime.value) : new Date();
   let baseTime = skipBlackout(new Date(startTime.getTime()));
 
   posts.forEach((post, i) => {
@@ -251,10 +305,19 @@ function splitPosts() {
     scheduledAt: null,
   }));
 
-  // Calculate posting times
+  // Update start time based on last post in Buffer before calculating
+  updateStartTimeDefault();
   calculatePostingTimes();
 
   showToast(`✂️ Split into ${posts.length} posts`, 'success');
+
+  if (lastBufferScheduledAt && new Date(lastBufferScheduledAt) > new Date()) {
+    const lastDate = new Date(lastBufferScheduledAt);
+    setTimeout(() => {
+      showToast(`🕐 Buffer has posts until ${formatTimeOnly(lastDate)}. First new post starts at ${formatTimeOnly(posts[0].scheduledAt)}.`, 'info');
+    }, 600);
+  }
+
   showPostsView();
 }
 
@@ -610,9 +673,23 @@ async function fetchQueueCount() {
     const data = await res.json();
     const bufferCount = data.count ?? '—';
     const pending = data.localQueue?.pending || 0;
+    lastBufferScheduledAt = data.lastScheduledAt || null;
+
+    if (data.minSpacing && !inputMinSpacing.dataset.userEdited) {
+      inputMinSpacing.value = data.minSpacing;
+    }
+    if (data.maxSpacing && !inputMaxSpacing.dataset.userEdited) {
+      inputMaxSpacing.value = data.maxSpacing;
+    }
+
     queueCount.textContent = `${bufferCount}/10`;
     if (pending > 0) {
       queueCount.textContent += ` · ${pending} queued`;
+    }
+
+    updateStartTimeDefault();
+    if (posts.length > 0 && !userManuallySetStartTime) {
+      recalculateTimes();
     }
   } catch {
     queueCount.textContent = '—';
