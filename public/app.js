@@ -303,13 +303,31 @@ function splitPosts() {
 
   let splitTexts = [];
 
+  // Strategy 0: JavaScript object / key-value format (e.g. const posts = { 1: `...`, 2: `...` })
+  if (/(?:const|let|var)?\s*\w*\s*=\s*\{|^\s*\{[\s\S]*\d+\s*:|\b\d+\s*:\s*[`'"]/.test(raw)) {
+    const kvRegex = /(?:['"]?(\w+)['"]?\s*:\s*)(?:`([\s\S]*?)`|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g;
+    let match;
+    const kvMatches = [];
+    while ((match = kvRegex.exec(raw)) !== null) {
+      const val = match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : match[4]);
+      if (val && val.trim()) {
+        kvMatches.push(val.trim());
+      }
+    }
+    if (kvMatches.length > 0) {
+      splitTexts = kvMatches;
+    }
+  }
+
   // Strategy 1: Try **N.** numbered posts with --- separators
-  const numberedPattern = /\*\*\d+\.\*\*/;
-  if (numberedPattern.test(raw)) {
-    splitTexts = raw
-      .split(/\*\*\d+\.\*\*/)
-      .map(s => s.replace(/^[\s\-]*/, '').replace(/[\s\-]*$/, '').trim())
-      .filter(s => s.length > 0);
+  if (splitTexts.length === 0) {
+    const numberedPattern = /\*\*\d+\.\*\*/;
+    if (numberedPattern.test(raw)) {
+      splitTexts = raw
+        .split(/\*\*\d+\.\*\*/)
+        .map(s => s.replace(/^[\s\-]*/, '').replace(/[\s\-]*$/, '').trim())
+        .filter(s => s.length > 0);
+    }
   }
 
   // Strategy 2: Try --- separator (if Strategy 1 didn't find enough)

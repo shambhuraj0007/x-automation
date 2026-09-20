@@ -40,7 +40,7 @@
       <div class="paste-section__header">
         <div class="paste-section__title-group">
           <h2 class="paste-section__title">📋 Paste Your Posts</h2>
-          <span class="paste-section__hint" id="paste-hint">Supports **N.** numbered, --- separated, or double-newline formats</span>
+          <span class="paste-section__hint" id="paste-hint">Supports JS key-value object (<code>const posts = { 1: `...` }</code>), **N.** numbered, or --- separated</span>
         </div>
         <div class="paste-section__toggle-wrap">
           <button type="button" class="btn btn--ghost btn--xs" id="btn-toggle-paste" title="Collapse / Expand paste box">
@@ -53,7 +53,7 @@
         <textarea
           id="paste-textarea"
           class="paste-textarea"
-          placeholder="Paste all your posts here...&#10;&#10;Format examples:&#10;&#10;**1.**&#10;Your first post text here...&#10;&#10;---&#10;&#10;**2.**&#10;Your second post text here...&#10;&#10;Or simply separate posts with --- or double blank lines."
+          placeholder="Paste all your posts here...&#10;&#10;Format examples:&#10;&#10;const posts = {&#10;  1: `Your first post text here...`,&#10;  2: `Your second post text here...`&#10;};&#10;&#10;Or:&#10;**1.** First post&#10;---&#10;**2.** Second post"
           spellcheck="false"
         ></textarea>
       </div>

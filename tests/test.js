@@ -54,7 +54,7 @@ test('parseResponse parses tweets correctly', () => {
   const { tweets, topics } = parseResponse(raw);
   assert.strictEqual(tweets.length, 3, 'Should parse 3 tweets');
   assert.strictEqual(topics.length, 2, 'Should parse 2 topics');
-  assert.strictEqual(tweets[0], 'First tweet here');
+  assert.strictEqual(tweets[0].text, 'First tweet here');
   assert.strictEqual(topics[0], 'topic1');
 });
 
