@@ -6,6 +6,7 @@ node_modules/
 
 # Runtime data
 logs/
+data/
 
 # OS
 .DS_Store
