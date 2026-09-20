@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Bulk paste and schedule Twitter/X posts to Buffer with smart splitting and spacing controls.">
+  <title>𝕏 Post Scheduler — Bulk Schedule Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐦</text></svg>">
+</head>
+<body>
+  <div class="app" id="app">
+
+    <!-- ═══ Header ═══ -->
+    <header class="header">
+      <div class="header__brand">
+        <div class="header__logo">𝕏</div>
+        <div>
+          <h1 class="header__title">Post Scheduler</h1>
+          <p class="header__subtitle">Bulk paste → split → schedule to Buffer</p>
+        </div>
+      </div>
+      <div class="header__status">
+        <div class="queue-badge" id="queue-badge" title="Buffer queue count">
+          <span class="queue-badge__dot"></span>
+          <span>Queue:</span>
+          <span class="queue-badge__count" id="queue-count">—</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ═══ Paste Section ═══ -->
+    <section class="paste-section" id="paste-section">
+      <div class="paste-section__header">
+        <h2 class="paste-section__title">📋 Paste Your Posts</h2>
+        <span class="paste-section__hint">Supports **N.** numbered, --- separated, or double-newline formats</span>
+      </div>
+
+      <div class="textarea-wrapper">
+        <textarea
+          id="paste-textarea"
+          class="paste-textarea"
+          placeholder="Paste all your posts here...&#10;&#10;Format examples:&#10;&#10;**1.**&#10;Your first post text here...&#10;&#10;---&#10;&#10;**2.**&#10;Your second post text here...&#10;&#10;Or simply separate posts with --- or double blank lines."
+          spellcheck="false"
+        ></textarea>
+      </div>
+
+      <div class="paste-actions">
+        <div class="paste-actions__left">
+          <span class="paste-info" id="paste-char-count">0 characters</span>
+        </div>
+        <div>
+          <button class="btn btn--ghost btn--sm" id="btn-clear" title="Clear textarea">
+            🗑️ Clear
+          </button>
+          <button class="btn btn--primary" id="btn-split" title="Split into individual posts">
+            ✂️ Split Posts
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Scheduling Controls ═══ -->
+    <div class="controls-bar hidden" id="controls-bar">
+      <div class="controls-bar__group">
+        <div class="control-field">
+          <label class="control-field__label" for="input-min-spacing">Min Spacing (min)</label>
+          <input type="number" id="input-min-spacing" class="control-field__input" value="45" min="1" max="1440">
+        </div>
+        <div class="control-field">
+          <label class="control-field__label" for="input-max-spacing">Max Spacing (min)</label>
+          <input type="number" id="input-max-spacing" class="control-field__input" value="80" min="1" max="1440">
+        </div>
+        <div class="control-field">
+          <label class="control-field__label" for="input-start-time">Start After</label>
+          <input type="datetime-local" id="input-start-time" class="control-field__input control-field__input--wide">
+        </div>
+      </div>
+
+      <div class="controls-bar__actions">
+        <span class="post-count-badge" id="post-count-badge">0 posts</span>
+        <button class="btn btn--ghost btn--sm" id="btn-back" title="Go back to paste view">
+          ← Back
+        </button>
+        <button class="btn btn--ghost btn--sm" id="btn-clear-all" title="Remove all posts">
+          🗑️ Clear All
+        </button>
+        <button class="btn btn--success btn--lg" id="btn-schedule" title="Schedule all posts to Buffer">
+          🚀 Schedule All
+        </button>
+      </div>
+    </div>
+
+    <!-- ═══ Progress Bar ═══ -->
+    <div class="progress-bar-wrapper hidden" id="progress-wrapper">
+      <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+    </div>
+
+    <!-- ═══ Posts Grid ═══ -->
+    <div class="posts-grid hidden" id="posts-grid"></div>
+
+    <!-- ═══ Empty State ═══ -->
+    <div class="empty-state hidden" id="empty-state">
+      <div class="empty-state__icon">📝</div>
+      <h3 class="empty-state__title">No posts yet</h3>
+      <p class="empty-state__desc">Paste your batch of posts above and click "Split Posts" to get started.</p>
+    </div>
+
+  </div>
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

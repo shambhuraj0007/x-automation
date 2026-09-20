@@ -1,11 +1,12 @@
 {
   "name": "twitter-automation",
-  "version": "1.0.0",
-  "description": "Self-refilling Buffer queue with Gemini-powered viral post generation",
+  "version": "2.0.0",
+  "description": "Bulk paste and schedule Twitter/X posts to Buffer via a web dashboard",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "dashboard": "node index.js",
     "setup": "node src/setup.js",
     "test": "node tests/test.js"
   },

@@ -1,11 +1,14 @@
 /**
- * index.js — Twitter Automation Daemon
+ * index.js — Twitter Post Scheduler Dashboard
  *
- * Entry point. Loads config, validates environment, starts the scheduler.
+ * Entry point. Starts an Express server that:
+ *  1. Serves the web dashboard (public/)
+ *  2. Exposes API routes for scheduling posts to Buffer
+ *  3. Runs a 4-hour auto-fill cron to keep Buffer at 10 posts
  *
  * Usage:
- *   node index.js          → production
- *   DRY_RUN=true node index.js  → dry run (no real API calls to Buffer)
+ *   node index.js              → start the dashboard + auto-fill
+ *   DRY_RUN=true node index.js → dry run (no real API calls to Buffer)
  */
 
 'use strict';
@@ -13,46 +16,57 @@
 // ── Load environment variables ──────────────────────────────────────────────
 require('dotenv').config();
 
+const express = require('express');
+const path = require('path');
 const logger = require('./src/logger');
-const { startFallbackCron, runStartupCheck } = require('./src/scheduler');
+const apiRouter = require('./src/api');
+const { startAutoFillCron, autoFillQueue } = require('./src/autoFill');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ── Middleware ───────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '5mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ── API Routes ──────────────────────────────────────────────────────────────
+app.use('/api', apiRouter);
 
 // ── Startup banner ──────────────────────────────────────────────────────────
 function printBanner() {
   const dryRun = process.env.DRY_RUN === 'true';
   logger.info('═══════════════════════════════════════════════════');
-  logger.info('  🐦 Twitter Automation Daemon — Starting Up');
-  logger.info(`  Niche    : ${process.env.TWEET_NICHE || '(not set)'}`);
-  logger.info(`  Model    : ${process.env.GEMINI_MODEL || 'gemini-1.5-flash'}`);
-  logger.info(`  Batch    : ${process.env.POSTS_PER_BATCH || 3} posts per refill`);
-  logger.info(`  Spacing  : ${process.env.MIN_SPACING_MINUTES || 45}–${process.env.MAX_SPACING_MINUTES || 120} min`);
-  logger.info(`  Threshold: refill when ≤ ${process.env.QUEUE_SOFT_THRESHOLD || 3} post`);
-  logger.info(`  Mode     : ${dryRun ? '🟡 DRY RUN (no real Buffer calls)' : '🟢 LIVE'}`);
+  logger.info('  🐦 Post Scheduler Dashboard — Starting Up');
+  logger.info(`  Port       : ${PORT}`);
+  logger.info(`  Spacing    : ${process.env.MIN_SPACING_MINUTES || 45}–${process.env.MAX_SPACING_MINUTES || 80} min`);
+  logger.info(`  Buffer max : 10 posts`);
+  logger.info(`  Blackout   : 2:00 AM – 6:00 AM (no posting)`);
+  logger.info(`  Auto-fill  : every 4 hours`);
+  logger.info(`  Mode       : ${dryRun ? '🟡 DRY RUN (no real Buffer calls)' : '🟢 LIVE'}`);
   logger.info('═══════════════════════════════════════════════════');
 }
 
 // ── Environment validation ──────────────────────────────────────────────────
 function validateEnv() {
-  const required = ['GEMINI_API_KEY', 'BUFFER_ACCESS_TOKEN', 'BUFFER_ORG_ID', 'BUFFER_CHANNEL_ID'];
+  const required = ['BUFFER_ACCESS_TOKEN', 'BUFFER_CHANNEL_ID'];
   const missing = required.filter(key => !process.env[key] || process.env[key].startsWith('your_'));
 
   if (missing.length > 0) {
     logger.error(`Missing or placeholder environment variables: ${missing.join(', ')}`);
-    logger.error('Please copy .env.example to .env and fill in your API keys.');
+    logger.error('Please fill in your Buffer API keys in .env');
     process.exit(1);
-  }
-
-  if (!process.env.TWEET_NICHE) {
-    logger.warn('TWEET_NICHE is not set — defaulting to "AI and technology"');
   }
 }
 
 // ── Graceful shutdown ───────────────────────────────────────────────────────
-function setupShutdownHandlers(monitorHandle, cronTask) {
+function setupShutdownHandlers(server, cronTask) {
   const shutdown = (signal) => {
     logger.info(`\nReceived ${signal} — shutting down gracefully...`);
     if (cronTask) cronTask.stop();
-    logger.info('Twitter Automation Daemon stopped. Goodbye! 👋');
-    process.exit(0);
+    server.close(() => {
+      logger.info('Post Scheduler Dashboard stopped. Goodbye! 👋');
+      process.exit(0);
+    });
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -60,7 +74,6 @@ function setupShutdownHandlers(monitorHandle, cronTask) {
 
   process.on('uncaughtException', (err) => {
     logger.error(`Uncaught exception: ${err.message}`, err);
-    // Don't exit — let the daemon keep running unless it's truly unrecoverable
   });
 
   process.on('unhandledRejection', (reason) => {
@@ -68,31 +81,27 @@ function setupShutdownHandlers(monitorHandle, cronTask) {
   });
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
-async function main() {
-  printBanner();
+// ── Start ───────────────────────────────────────────────────────────────────
+printBanner();
 
-  // Skip validation in dry-run mode for easier testing
-  if (process.env.DRY_RUN !== 'true') {
-    validateEnv();
-  } else {
-    logger.warn('DRY RUN mode: skipping environment validation');
-  }
-
-  // 1. Startup check — fill queue immediately if needed
-  await runStartupCheck();
-
-  // 2. 4-hour fallback cron — safety net
-  const cronTask = startFallbackCron();
-
-  // 3. Register shutdown handlers
-  setupShutdownHandlers(null, cronTask);
-
-  logger.info('✅ Daemon is running. Press Ctrl+C to stop.');
-  logger.info(`📋 Logs are saved to: ${require('path').join(process.cwd(), 'logs')}`);
+if (process.env.DRY_RUN !== 'true') {
+  validateEnv();
+} else {
+  logger.warn('DRY RUN mode: skipping environment validation');
 }
 
-main().catch((err) => {
-  logger.error(`Fatal startup error: ${err.message}`, err);
-  process.exit(1);
+// Start Express server
+const server = app.listen(PORT, () => {
+  logger.info(`✅ Dashboard is running at http://localhost:${PORT}`);
+  logger.info(`📋 Logs are saved to: ${path.join(process.cwd(), 'logs')}`);
 });
+
+// Start 4-hour auto-fill cron
+const cronTask = startAutoFillCron();
+
+// Run an immediate auto-fill check on startup (in case queue drained while offline)
+autoFillQueue().catch(err => {
+  logger.warn(`Startup auto-fill check failed: ${err.message}`);
+});
+
+setupShutdownHandlers(server, cronTask);
