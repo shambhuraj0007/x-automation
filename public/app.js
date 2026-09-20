@@ -41,7 +41,9 @@ const progressBar     = $('#progress-bar');
 const postsGrid       = $('#posts-grid');
 const emptyState      = $('#empty-state');
 const queueCount      = $('#queue-count');
+const selectChannel   = $('#select-channel');
 const toastContainer  = $('#toast-container');
+let activeChannelId   = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -50,10 +52,16 @@ document.addEventListener('DOMContentLoaded', () => {
   now.setMinutes(now.getMinutes() + 60);
   inputStartTime.value = toLocalDateTimeString(skipBlackout(now));
 
+  // Load available channels into dropdown
+  fetchChannels();
+
   // Query Buffer queue and last scheduled post time
   fetchQueueCount();
 
   // Event listeners
+  if (selectChannel) {
+    selectChannel.addEventListener('change', onChannelChange);
+  }
   pasteTextarea.addEventListener('input', updatePasteCharCount);
   btnClear.addEventListener('click', clearTextarea);
   btnSplit.addEventListener('click', splitPosts);
@@ -842,6 +850,67 @@ async function loadExistingPosts() {
     }
   } catch (err) {
     console.debug('No existing posts to restore:', err);
+  }
+}
+
+// ── Channels (Accounts) ───────────────────────────────────────────────────
+
+async function fetchChannels() {
+  try {
+    const res = await fetch('/api/channels');
+    const data = await res.json();
+    if (!data.channels || data.channels.length === 0) return;
+
+    activeChannelId = data.activeChannelId;
+    if (selectChannel) {
+      selectChannel.innerHTML = '';
+      data.channels.forEach(ch => {
+        const opt = document.createElement('option');
+        opt.value = ch.id;
+        const handle = ch.displayName || ch.name;
+        opt.textContent = `@${handle}`;
+        if (ch.id === activeChannelId) {
+          opt.selected = true;
+        }
+        selectChannel.appendChild(opt);
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to load Buffer channels:', err);
+  }
+}
+
+async function onChannelChange() {
+  const newChannelId = selectChannel.value;
+  if (!newChannelId || newChannelId === activeChannelId) return;
+
+  const selectedOption = selectChannel.options[selectChannel.selectedIndex];
+  const handle = selectedOption ? selectedOption.textContent : 'account';
+
+  try {
+    const res = await fetch('/api/channels/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: newChannelId }),
+    });
+
+    const data = await res.json();
+    if (res.ok && data.success) {
+      activeChannelId = newChannelId;
+      showToast(`Switched account to ${handle} 🐦`, 'success');
+      // Refresh queue count and scheduling time for the selected account
+      await fetchQueueCount();
+      // Recalculate pending posts based on the new account's queue
+      if (posts.length > 0) {
+        calculatePostingTimes();
+        renderPosts();
+      }
+    } else {
+      throw new Error(data.error || 'Failed to switch account');
+    }
+  } catch (err) {
+    showToast(`❌ ${err.message}`, 'error');
+    selectChannel.value = activeChannelId; // revert
   }
 }
 

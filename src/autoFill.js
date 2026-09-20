@@ -13,7 +13,7 @@
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getActiveChannelId } = require('./buffer');
 const postQueue = require('./postQueue');
 const { schedulePostToBuffer } = require('./api');
 
@@ -109,7 +109,7 @@ async function autoFillQueue() {
 
     const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
     const token = process.env.BUFFER_ACCESS_TOKEN;
-    const channelId = process.env.BUFFER_CHANNEL_ID;
+    const channelId = getActiveChannelId();
 
     for (let i = 0; i < toSchedule.length; i++) {
       const post = toSchedule[i];

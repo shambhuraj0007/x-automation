@@ -181,6 +181,54 @@ body::before {
   gap: var(--space-md);
 }
 
+.account-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 4px 12px;
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  transition: all var(--duration-normal) var(--ease-out);
+}
+
+.account-selector:hover {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.15);
+}
+
+.account-selector__icon {
+  font-size: 0.88rem;
+}
+
+.account-selector__select {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  padding: 4px 6px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 2px center;
+  padding-right: 20px;
+}
+
+.account-selector__select option {
+  background: #111827;
+  color: #f8fafc;
+  font-size: 0.85rem;
+  padding: 8px;
+}
+
 .queue-badge {
   display: flex;
   align-items: center;

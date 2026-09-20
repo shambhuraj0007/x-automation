@@ -12,12 +12,49 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const pRetry = require('p-retry').default;
 const logger = require('./logger');
 const { generateImage } = require('./imageGen');
 
 const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
+const CONFIG_FILE = path.join(process.cwd(), 'data', 'config.json');
+
+// ── Active Channel Management ──────────────────────────────────────────────
+
+function getActiveChannelId() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+      if (cfg && cfg.activeChannelId) {
+        return cfg.activeChannelId;
+      }
+    }
+  } catch (err) {
+    logger.debug(`Buffer: could not read config.json — ${err.message}`);
+  }
+  return process.env.BUFFER_CHANNEL_ID;
+}
+
+function setActiveChannelId(channelId) {
+  try {
+    const dir = path.dirname(CONFIG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let cfg = {};
+    if (fs.existsSync(CONFIG_FILE)) {
+      try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch {}
+    }
+    cfg.activeChannelId = channelId;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+  } catch (err) {
+    logger.warn(`Buffer: could not write config.json — ${err.message}`);
+  }
+  process.env.BUFFER_CHANNEL_ID = channelId;
+  logger.info(`Buffer: active channel switched to ${channelId}`);
+}
 
 // ── GraphQL client ──────────────────────────────────────────────────────────
 
@@ -138,16 +175,45 @@ function nextScheduledTime(base) {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /**
+ * Fetch all available channels for the configured organization.
+ * @returns {Promise<Array<{id: string, name: string, displayName: string, service: string, avatar: string}>>}
+ */
+async function getChannels() {
+  const orgId = process.env.BUFFER_ORG_ID;
+  if (!orgId) throw new Error('BUFFER_ORG_ID is not set in .env');
+
+  return pRetry(
+    async () => {
+      const data = await gql(`
+        query {
+          channels(input: { organizationId: "${orgId}" }) {
+            id
+            name
+            service
+            displayName
+            avatar
+            isQueuePaused
+          }
+        }
+      `);
+      return data.channels || [];
+    },
+    { retries: 2, minTimeout: 1500 }
+  );
+}
+
+/**
  * Fetch scheduled posts info from Buffer:
  * - count: total number of scheduled posts
  * - lastScheduledAt: ISO string of the post scheduled furthest out in time (or null)
  * - posts: array of { id, dueAt, text, status }
  *
+ * @param {string} [targetChannelId] - Optional specific channel ID to query
  * @returns {Promise<{count: number, lastScheduledAt: string|null, posts: Array}>}
  */
-async function getBufferQueueInfo() {
+async function getBufferQueueInfo(targetChannelId) {
   const orgId = process.env.BUFFER_ORG_ID;
-  const channelId = process.env.BUFFER_CHANNEL_ID;
+  const channelId = targetChannelId || getActiveChannelId();
 
   if (!orgId || !channelId) {
     throw new Error(
@@ -216,8 +282,8 @@ async function getBufferQueueInfo() {
  *
  * @returns {Promise<number>}
  */
-async function getQueueCount() {
-  const info = await getBufferQueueInfo();
+async function getQueueCount(targetChannelId) {
+  const info = await getBufferQueueInfo(targetChannelId);
   return info.count;
 }
 
@@ -338,4 +404,13 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
   );
 }
 
-module.exports = { getBufferQueueInfo, getQueueCount, schedulePosts, nextScheduledTime, discoverIds };
+module.exports = {
+  getBufferQueueInfo,
+  getQueueCount,
+  schedulePosts,
+  nextScheduledTime,
+  discoverIds,
+  getChannels,
+  getActiveChannelId,
+  setActiveChannelId,
+};

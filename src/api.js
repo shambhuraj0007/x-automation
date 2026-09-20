@@ -17,7 +17,7 @@
 
 const express = require('express');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, setActiveChannelId } = require('./buffer');
 const postQueue = require('./postQueue');
 
 const router = express.Router();
@@ -129,9 +129,9 @@ router.post('/schedule', async (req, res) => {
       return res.status(400).json({ error: 'posts array is required and must not be empty' });
     }
 
-    const channelId = process.env.BUFFER_CHANNEL_ID;
+    const channelId = req.body.channelId || getActiveChannelId();
     if (!channelId) {
-      return res.status(500).json({ error: 'BUFFER_CHANNEL_ID is not set' });
+      return res.status(500).json({ error: 'No active Buffer channel configured' });
     }
 
     const dryRun = process.env.DRY_RUN === 'true';
@@ -160,7 +160,7 @@ router.post('/schedule', async (req, res) => {
     let currentBufferCount = 0;
     let lastScheduledAt = null;
     try {
-      const bufferInfo = await getBufferQueueInfo();
+      const bufferInfo = await getBufferQueueInfo(channelId);
       currentBufferCount = bufferInfo.count;
       lastScheduledAt = bufferInfo.lastScheduledAt;
     } catch (err) {
@@ -259,11 +259,49 @@ router.post('/schedule', async (req, res) => {
   }
 });
 
+// ── GET /api/channels ────────────────────────────────────────────────────
+
+router.get('/channels', async (req, res) => {
+  try {
+    const channels = await getChannels();
+    const activeChannelId = getActiveChannelId();
+    res.json({ activeChannelId, channels });
+  } catch (err) {
+    logger.error(`API: /channels error — ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/channels/switch ────────────────────────────────────────────
+
+router.post('/channels/switch', async (req, res) => {
+  try {
+    const { channelId } = req.body;
+    if (!channelId) {
+      return res.status(400).json({ error: 'channelId is required' });
+    }
+
+    const channels = await getChannels();
+    const matched = channels.find(c => c.id === channelId);
+    if (!matched) {
+      return res.status(404).json({ error: `Channel with id ${channelId} not found` });
+    }
+
+    setActiveChannelId(channelId);
+    logger.info(`API: switched active channel to "${matched.displayName || matched.name}" (${channelId})`);
+    res.json({ success: true, activeChannelId: channelId, channel: matched });
+  } catch (err) {
+    logger.error(`API: /channels/switch error — ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/queue ───────────────────────────────────────────────────────
 
 router.get('/queue', async (req, res) => {
   try {
-    const info = await getBufferQueueInfo();
+    const targetChannelId = req.query.channelId || getActiveChannelId();
+    const info = await getBufferQueueInfo(targetChannelId);
     const stats = postQueue.getStats();
     const localHighest = postQueue.getHighestScheduledTime();
     const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
@@ -282,6 +320,7 @@ router.get('/queue', async (req, res) => {
     }
 
     res.json({
+      activeChannelId: targetChannelId,
       count: info.count,
       lastScheduledAt: info.lastScheduledAt, // furthest in Buffer
       highestScheduledAt,                   // furthest overall (Buffer or local queue)
@@ -292,6 +331,7 @@ router.get('/queue', async (req, res) => {
   } catch (err) {
     logger.error(`API: /queue error — ${err.message}`);
     res.json({
+      activeChannelId: getActiveChannelId(),
       count: null,
       lastScheduledAt: null,
       highestScheduledAt: null,
