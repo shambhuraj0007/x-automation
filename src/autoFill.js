@@ -80,9 +80,10 @@ async function autoFillQueue() {
     logger.info(`AutoFill: need to fill ${slotsToFill} slot(s)`);
 
     // 3. Get pending posts from local queue
-    const pending = postQueue.getPendingPosts();
+    const channelId = getActiveChannelId();
+    const pending = postQueue.getPendingPosts(channelId);
     if (pending.length === 0) {
-      logger.info('AutoFill: no pending posts in local queue — nothing to schedule');
+      logger.info(`AutoFill: no pending posts in local queue for channel ${channelId} — nothing to schedule`);
       return;
     }
 
@@ -109,7 +110,6 @@ async function autoFillQueue() {
 
     const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
     const token = process.env.BUFFER_ACCESS_TOKEN;
-    const channelId = getActiveChannelId();
 
     for (let i = 0; i < toSchedule.length; i++) {
       const post = toSchedule[i];

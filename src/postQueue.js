@@ -55,8 +55,9 @@ function writeQueue(queue) {
  * Replaces any existing queue.
  *
  * @param {Array<{text: string, scheduledAt: string}>} posts
+ * @param {string} [channelId]
  */
-function saveBatch(posts) {
+function saveBatch(posts, channelId) {
   const queue = {
     posts: posts.map((p, i) => ({
       index: i + 1,
@@ -64,6 +65,7 @@ function saveBatch(posts) {
       scheduledAt: p.scheduledAt,
       status: 'pending',       // pending | scheduled | error
       bufferPostId: null,
+      channelId: channelId || null,
       error: null,
       scheduledToBufferAt: null,
     })),
@@ -80,8 +82,9 @@ function saveBatch(posts) {
  * Assigns continuous 1-based indices.
  *
  * @param {Array<{text: string, scheduledAt: string}>} newPosts
+ * @param {string} [channelId]
  */
-function appendBatch(newPosts) {
+function appendBatch(newPosts, channelId) {
   const queue = readQueue();
   const existingPosts = queue.posts || [];
   const startIndex = existingPosts.length;
@@ -92,6 +95,7 @@ function appendBatch(newPosts) {
     scheduledAt: p.scheduledAt,
     status: 'pending',
     bufferPostId: null,
+    channelId: channelId || null,
     error: null,
     scheduledToBufferAt: null,
   }));
@@ -106,14 +110,16 @@ function appendBatch(newPosts) {
 
 /**
  * Get the latest/highest scheduledAt time among all posts in the local queue.
+ * @param {string} [channelId]
  * @returns {string|null} ISO date string, or null
  */
-function getHighestScheduledTime() {
+function getHighestScheduledTime(channelId) {
   const queue = readQueue();
   const posts = queue.posts || [];
   let maxDate = null;
 
   for (const post of posts) {
+    if (channelId && post.channelId && post.channelId !== channelId) continue;
     if (post.scheduledAt) {
       const d = new Date(post.scheduledAt);
       if (!isNaN(d.getTime())) {
@@ -129,30 +135,45 @@ function getHighestScheduledTime() {
 
 /**
  * Clear the queue.
+ * @param {string} [channelId]
  */
-function clearQueue() {
-  const queue = { posts: [], createdAt: null, totalCount: 0 };
+function clearQueue(channelId) {
+  if (!channelId) {
+    const queue = { posts: [], createdAt: null, totalCount: 0 };
+    writeQueue(queue);
+    logger.info('PostQueue: queue cleared completely');
+    return queue;
+  }
+  const queue = readQueue();
+  const remaining = (queue.posts || []).filter(p => p.channelId && p.channelId !== channelId);
+  queue.posts = remaining;
+  queue.totalCount = remaining.length;
   writeQueue(queue);
-  logger.info('PostQueue: queue cleared');
+  logger.info(`PostQueue: cleared queue for channel ${channelId}`);
   return queue;
 }
 
 /**
  * Get posts that are still pending (not yet sent to Buffer).
+ * @param {string} [channelId]
  * @returns {Array}
  */
-function getPendingPosts() {
+function getPendingPosts(channelId) {
   const queue = readQueue();
-  return queue.posts.filter(p => p.status === 'pending');
+  const posts = queue.posts || [];
+  return posts.filter(p => p.status === 'pending' && (!channelId || !p.channelId || p.channelId === channelId));
 }
 
 /**
  * Get all posts with their statuses.
+ * @param {string} [channelId]
  * @returns {Array}
  */
-function getAllPosts() {
+function getAllPosts(channelId) {
   const queue = readQueue();
-  return queue.posts || [];
+  const posts = queue.posts || [];
+  if (!channelId) return posts;
+  return posts.filter(p => !p.channelId || p.channelId === channelId);
 }
 
 /**
@@ -191,10 +212,12 @@ function markError(index, error) {
 
 /**
  * Get queue summary stats.
+ * @param {string} [channelId]
  */
-function getStats() {
+function getStats(channelId) {
   const queue = readQueue();
-  const posts = queue.posts || [];
+  const allPosts = queue.posts || [];
+  const posts = channelId ? allPosts.filter(p => !p.channelId || p.channelId === channelId) : allPosts;
   return {
     total: posts.length,
     pending: posts.filter(p => p.status === 'pending').length,

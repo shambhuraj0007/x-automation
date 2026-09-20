@@ -147,13 +147,13 @@ router.post('/schedule', async (req, res) => {
     // 2. Save / Append posts to local queue
     let addedItems = [];
     if (mode === 'replace') {
-      postQueue.saveBatch(cleanedPosts);
-      addedItems = postQueue.getAllPosts();
-      logger.info(`API: replaced local queue with ${cleanedPosts.length} posts`);
+      postQueue.saveBatch(cleanedPosts, channelId);
+      addedItems = postQueue.getAllPosts(channelId);
+      logger.info(`API: replaced local queue with ${cleanedPosts.length} posts for channel ${channelId}`);
     } else {
-      const appendResult = postQueue.appendBatch(cleanedPosts);
+      const appendResult = postQueue.appendBatch(cleanedPosts, channelId);
       addedItems = appendResult.newItems;
-      logger.info(`API: appended ${cleanedPosts.length} posts to local queue (total: ${postQueue.getStats().total})`);
+      logger.info(`API: appended ${cleanedPosts.length} posts to local queue (total: ${postQueue.getStats(channelId).total})`);
     }
 
     // 3. Check current Buffer queue to know how many slots are available
@@ -302,8 +302,8 @@ router.get('/queue', async (req, res) => {
   try {
     const targetChannelId = req.query.channelId || getActiveChannelId();
     const info = await getBufferQueueInfo(targetChannelId);
-    const stats = postQueue.getStats();
-    const localHighest = postQueue.getHighestScheduledTime();
+    const stats = postQueue.getStats(targetChannelId);
+    const localHighest = postQueue.getHighestScheduledTime(targetChannelId);
     const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
     const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
 
@@ -345,17 +345,143 @@ router.get('/queue', async (req, res) => {
 
 // ── GET /api/posts ───────────────────────────────────────────────────────
 
-router.get('/posts', (req, res) => {
-  const posts = postQueue.getAllPosts();
-  const stats = postQueue.getStats();
-  const highestScheduledAt = postQueue.getHighestScheduledTime();
-  res.json({ posts, stats, highestScheduledAt });
+router.get('/posts', async (req, res) => {
+  try {
+    const targetChannelId = req.query.channelId || getActiveChannelId();
+
+    // 1. Fetch live scheduled posts from Buffer
+    let bufferPosts = [];
+    let bufferCount = 0;
+    try {
+      if (targetChannelId) {
+        const bufferInfo = await getBufferQueueInfo(targetChannelId);
+        bufferPosts = bufferInfo.posts || [];
+        bufferCount = bufferInfo.count || 0;
+      }
+    } catch (err) {
+      logger.warn(`API: could not fetch Buffer posts for /api/posts — ${err.message}`);
+    }
+
+    // 2. Fetch local queue posts for this channel
+    const localPosts = postQueue.getAllPosts(targetChannelId);
+    const stats = postQueue.getStats(targetChannelId);
+
+    // 3. Construct the combined post list
+    let combinedPosts = [];
+    const bufferPostMap = new Map();
+    bufferPosts.forEach(bp => {
+      bufferPostMap.set(bp.id, bp);
+    });
+
+    if (localPosts.length > 0) {
+      localPosts.forEach(lp => {
+        if (lp.status === 'scheduled') {
+          const matchingBufferPost = lp.bufferPostId ? bufferPostMap.get(lp.bufferPostId) : null;
+          combinedPosts.push({
+            id: lp.bufferPostId || ('p_' + lp.index),
+            index: lp.index,
+            text: lp.text,
+            status: 'scheduled',
+            scheduledAt: matchingBufferPost?.dueAt || lp.scheduledAt,
+            inBuffer: true,
+          });
+          if (matchingBufferPost) {
+            bufferPostMap.delete(matchingBufferPost.id);
+          }
+        } else if (lp.status === 'pending') {
+          // In local queue waiting for 4-hour auto-fill cron
+          combinedPosts.push({
+            id: 'p_' + lp.index,
+            index: lp.index,
+            text: lp.text,
+            status: 'queued', // UI displays as "🕐 Queued (auto-fill)"
+            scheduledAt: lp.scheduledAt,
+            inBuffer: false,
+          });
+        } else if (lp.status === 'error') {
+          combinedPosts.push({
+            id: 'p_' + lp.index,
+            index: lp.index,
+            text: lp.text,
+            status: 'error',
+            error: lp.error,
+            scheduledAt: lp.scheduledAt,
+            inBuffer: false,
+          });
+        }
+      });
+
+      // Include any remaining Buffer posts not in local queue
+      bufferPostMap.forEach(bp => {
+        combinedPosts.push({
+          id: bp.id,
+          index: combinedPosts.length + 1,
+          text: bp.text,
+          status: 'scheduled',
+          scheduledAt: bp.dueAt,
+          inBuffer: true,
+        });
+      });
+    } else {
+      // Local queue is empty, load all scheduled posts directly from Buffer
+      bufferPosts.forEach((bp, idx) => {
+        combinedPosts.push({
+          id: bp.id,
+          index: idx + 1,
+          text: bp.text,
+          status: 'scheduled',
+          scheduledAt: bp.dueAt,
+          inBuffer: true,
+        });
+      });
+    }
+
+    // Sort by scheduled time ascending
+    combinedPosts.sort((a, b) => {
+      if (!a.scheduledAt) return 1;
+      if (!b.scheduledAt) return -1;
+      return new Date(a.scheduledAt) - new Date(b.scheduledAt);
+    });
+
+    // Re-index continuous 1..N
+    combinedPosts.forEach((p, i) => { p.index = i + 1; });
+
+    // Determine highest scheduled time
+    let highestScheduledAt = null;
+    for (const p of combinedPosts) {
+      if (p.scheduledAt) {
+        const d = new Date(p.scheduledAt);
+        if (!isNaN(d.getTime())) {
+          if (!highestScheduledAt || d > new Date(highestScheduledAt)) {
+            highestScheduledAt = d.toISOString();
+          }
+        }
+      }
+    }
+
+    res.json({
+      activeChannelId: targetChannelId,
+      posts: combinedPosts,
+      stats: {
+        total: combinedPosts.length,
+        inBuffer: combinedPosts.filter(p => p.status === 'scheduled').length,
+        queued: combinedPosts.filter(p => p.status === 'queued').length,
+        pending: combinedPosts.filter(p => p.status === 'pending').length,
+      },
+      bufferCount,
+      highestScheduledAt,
+    });
+  } catch (err) {
+    logger.error(`API: /posts error — ${err.message}`, err);
+    res.status(500).json({ error: err.message, posts: [] });
+  }
 });
 
 // ── POST /api/clear ──────────────────────────────────────────────────────
 
 router.post('/clear', (req, res) => {
-  const cleared = postQueue.clearQueue();
+  const channelId = req.body?.channelId || getActiveChannelId();
+  const cleared = postQueue.clearQueue(channelId);
   res.json({ success: true, message: 'Local queue cleared', queue: cleared });
 });
 

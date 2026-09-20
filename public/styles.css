@@ -290,6 +290,37 @@ body::before {
   margin-bottom: var(--space-lg);
 }
 
+.paste-section__title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.paste-section__toggle-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.paste-section--collapsed {
+  padding-top: var(--space-md);
+  padding-bottom: var(--space-md);
+}
+
+.paste-section--collapsed .textarea-wrapper,
+.paste-section--collapsed .paste-actions {
+  display: none !important;
+}
+
+.paste-section--collapsed .paste-section__header {
+  margin-bottom: 0;
+}
+
+.btn--xs {
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  border-radius: var(--radius-sm);
+}
+
 .paste-section__title {
   font-size: 1.15rem;
   font-weight: 600;

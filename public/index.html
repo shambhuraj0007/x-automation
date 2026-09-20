@@ -35,14 +35,21 @@
       </div>
     </header>
 
-    <!-- ═══ Paste Section ═══ -->
+    <!-- ═══ Paste Section (Always accessible) ═══ -->
     <section class="paste-section" id="paste-section">
       <div class="paste-section__header">
-        <h2 class="paste-section__title">📋 Paste Your Posts</h2>
-        <span class="paste-section__hint">Supports **N.** numbered, --- separated, or double-newline formats</span>
+        <div class="paste-section__title-group">
+          <h2 class="paste-section__title">📋 Paste Your Posts</h2>
+          <span class="paste-section__hint" id="paste-hint">Supports **N.** numbered, --- separated, or double-newline formats</span>
+        </div>
+        <div class="paste-section__toggle-wrap">
+          <button type="button" class="btn btn--ghost btn--xs" id="btn-toggle-paste" title="Collapse / Expand paste box">
+            ▲ Minimize
+          </button>
+        </div>
       </div>
 
-      <div class="textarea-wrapper">
+      <div class="textarea-wrapper" id="paste-textarea-wrapper">
         <textarea
           id="paste-textarea"
           class="paste-textarea"
@@ -51,18 +58,15 @@
         ></textarea>
       </div>
 
-      <div class="paste-actions">
+      <div class="paste-actions" id="paste-actions">
         <div class="paste-actions__left">
           <span class="paste-info" id="paste-char-count">0 characters</span>
         </div>
         <div>
-          <button class="btn btn--ghost btn--sm hidden" id="btn-cancel-paste" title="Cancel and return to posts view">
-            ✕ Cancel
-          </button>
-          <button class="btn btn--ghost btn--sm" id="btn-clear" title="Clear textarea">
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-clear" title="Clear textarea">
             🗑️ Clear
           </button>
-          <button class="btn btn--primary" id="btn-split" title="Split into individual posts">
+          <button type="button" class="btn btn--primary" id="btn-split" title="Split into individual posts">
             ✂️ Split Posts
           </button>
         </div>
@@ -70,7 +74,7 @@
     </section>
 
     <!-- ═══ Scheduling Controls ═══ -->
-    <div class="controls-bar hidden" id="controls-bar">
+    <div class="controls-bar" id="controls-bar">
       <div class="controls-bar__group">
         <div class="control-field">
           <label class="control-field__label" for="input-min-spacing">Min Spacing (min)</label>
@@ -88,13 +92,13 @@
 
       <div class="controls-bar__actions">
         <span class="post-count-badge" id="post-count-badge">0 posts</span>
-        <button class="btn btn--primary btn--sm" id="btn-add-more" title="Paste and add more posts to the queue">
+        <button type="button" class="btn btn--primary btn--sm" id="btn-add-more" title="Scroll and focus paste box">
           ➕ Add More Posts
         </button>
-        <button class="btn btn--ghost btn--sm" id="btn-clear-all" title="Remove all posts">
-          🗑️ Clear All
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-clear-all" title="Clear local queue">
+          🗑️ Clear Queue
         </button>
-        <button class="btn btn--success btn--lg" id="btn-schedule" title="Schedule posts to Buffer">
+        <button type="button" class="btn btn--success btn--lg" id="btn-schedule" title="Schedule posts to Buffer">
           🚀 Schedule All
         </button>
       </div>
@@ -106,13 +110,13 @@
     </div>
 
     <!-- ═══ Posts Grid ═══ -->
-    <div class="posts-grid hidden" id="posts-grid"></div>
+    <div class="posts-grid" id="posts-grid"></div>
 
     <!-- ═══ Empty State ═══ -->
     <div class="empty-state hidden" id="empty-state">
       <div class="empty-state__icon">📝</div>
       <h3 class="empty-state__title">No posts yet</h3>
-      <p class="empty-state__desc">Paste your batch of posts above and click "Split Posts" to get started.</p>
+      <p class="empty-state__desc">Paste your batch of posts in the box above and click "Split Posts" to preview and schedule them.</p>
     </div>
 
   </div>

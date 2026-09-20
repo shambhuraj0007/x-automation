@@ -25,6 +25,8 @@ const pasteCharCount  = $('#paste-char-count');
 const btnClear        = $('#btn-clear');
 const btnSplit        = $('#btn-split');
 const pasteSection    = $('#paste-section');
+const btnTogglePaste  = $('#btn-toggle-paste');
+const pasteHint       = $('#paste-hint');
 
 const controlsBar     = $('#controls-bar');
 const inputMinSpacing = $('#input-min-spacing');
@@ -32,7 +34,6 @@ const inputMaxSpacing = $('#input-max-spacing');
 const inputStartTime  = $('#input-start-time');
 const postCountBadge  = $('#post-count-badge');
 const btnAddMore      = $('#btn-add-more');
-const btnCancelPaste  = $('#btn-cancel-paste');
 const btnClearAll     = $('#btn-clear-all');
 const btnSchedule     = $('#btn-schedule');
 
@@ -44,6 +45,7 @@ const queueCount      = $('#queue-count');
 const selectChannel   = $('#select-channel');
 const toastContainer  = $('#toast-container');
 let activeChannelId   = null;
+let isPasteCollapsed  = false;
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -58,20 +60,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // Query Buffer queue and last scheduled post time
   fetchQueueCount();
 
+  // Load existing posts from Buffer and server queue
+  loadExistingPosts();
+
   // Event listeners
   if (selectChannel) {
     selectChannel.addEventListener('change', onChannelChange);
+  }
+  if (btnTogglePaste) {
+    btnTogglePaste.addEventListener('click', togglePasteSection);
   }
   pasteTextarea.addEventListener('input', updatePasteCharCount);
   btnClear.addEventListener('click', clearTextarea);
   btnSplit.addEventListener('click', splitPosts);
   if (btnAddMore) btnAddMore.addEventListener('click', openAddMore);
-  if (btnCancelPaste) btnCancelPaste.addEventListener('click', closeAddMore);
   btnClearAll.addEventListener('click', clearAllPosts);
   btnSchedule.addEventListener('click', scheduleAll);
-
-  // Load existing posts from server queue if any
-  loadExistingPosts();
 
   // Recalculate times when spacing or start time changes
   inputMinSpacing.addEventListener('input', () => {
@@ -414,18 +418,34 @@ function splitPosts() {
     }
   }
 
+  // Clear textarea after splitting so it's clean and ready for more
+  pasteTextarea.value = '';
+  updatePasteCharCount();
+
   showPostsView();
+
+  // Smooth scroll to the controls / grid so the user sees their posts
+  setTimeout(() => {
+    controlsBar.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 100);
 }
 
 // ── View Management ───────────────────────────────────────────────────────
 
 function showPostsView() {
-  pasteSection.classList.add('hidden');
+  // Both Paste Section and Controls Bar + Posts Grid stay visible!
+  pasteSection.classList.remove('hidden');
   controlsBar.classList.remove('hidden');
-  postsGrid.classList.remove('hidden');
-  emptyState.classList.add('hidden');
-  if (btnCancelPaste) btnCancelPaste.classList.add('hidden');
-  btnSplit.textContent = '✂️ Split Posts';
+
+  if (posts.length === 0) {
+    emptyState.classList.remove('hidden');
+    postsGrid.classList.add('hidden');
+    btnSplit.textContent = '✂️ Split Posts';
+  } else {
+    emptyState.classList.add('hidden');
+    postsGrid.classList.remove('hidden');
+    btnSplit.textContent = '➕ Add to Queue';
+  }
 
   updatePostCountBadge();
   renderPosts();
@@ -433,35 +453,55 @@ function showPostsView() {
 
 function openAddMore() {
   if (isScheduling) return;
-  pasteSection.classList.remove('hidden');
-  if (btnCancelPaste) btnCancelPaste.classList.remove('hidden');
-  btnSplit.textContent = '➕ Add to Queue';
-
+  if (isPasteCollapsed) {
+    togglePasteSection();
+  }
   const highest = getHighestScheduledRemainingTime();
-  const hint = document.querySelector('.paste-section__hint');
-  if (hint) {
+  if (pasteHint) {
     if (highest) {
-      hint.innerHTML = `Adding more posts (currently <strong>${posts.length}</strong> in queue). New posts will schedule starting after <strong>${formatDateTime(highest)}</strong>.`;
+      pasteHint.innerHTML = `Adding more posts (${posts.length} posts active). Continues after <strong>${formatDateTime(highest)}</strong>.`;
     } else {
-      hint.textContent = 'Paste more posts to add to your queue.';
+      pasteHint.textContent = 'Paste more posts to add to your queue.';
     }
   }
-
-  pasteTextarea.value = '';
-  updatePasteCharCount();
-  pasteSection.scrollIntoView({ behavior: 'smooth' });
+  pasteSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   pasteTextarea.focus();
 }
 
-function closeAddMore() {
-  if (posts.length > 0) {
-    pasteSection.classList.add('hidden');
+function togglePasteSection() {
+  isPasteCollapsed = !isPasteCollapsed;
+  if (isPasteCollapsed) {
+    pasteSection.classList.add('paste-section--collapsed');
+    if (btnTogglePaste) {
+      btnTogglePaste.textContent = '▼ Expand';
+      btnTogglePaste.title = 'Expand paste box';
+    }
+  } else {
+    pasteSection.classList.remove('paste-section--collapsed');
+    if (btnTogglePaste) {
+      btnTogglePaste.textContent = '▲ Minimize';
+      btnTogglePaste.title = 'Minimize paste box';
+    }
   }
 }
 
 function updatePostCountBadge() {
+  if (posts.length === 0) {
+    postCountBadge.textContent = '0 posts';
+    return;
+  }
+  const inBufferCount = posts.filter(p => p.status === 'scheduled').length;
+  const queuedCount = posts.filter(p => p.status === 'queued').length;
+  const pendingCount = posts.filter(p => p.status === 'pending').length;
   const totalDuration = getTotalScheduleDuration();
-  postCountBadge.textContent = `${posts.length} post${posts.length !== 1 ? 's' : ''} · ${totalDuration}`;
+
+  let parts = [];
+  if (inBufferCount > 0) parts.push(`${inBufferCount} in Buffer`);
+  if (queuedCount > 0) parts.push(`${queuedCount} queued`);
+  if (pendingCount > 0) parts.push(`${pendingCount} ready`);
+
+  const breakdown = parts.length > 0 ? parts.join(' · ') : `${posts.length} posts`;
+  postCountBadge.textContent = `${posts.length} posts (${breakdown}) · ${totalDuration}`;
 }
 
 function getTotalScheduleDuration() {
@@ -531,8 +571,8 @@ function createPostCard(post, index) {
       <div class="post-card__actions">
         <button class="post-card__action-btn post-card__action-btn--delete"
                 onclick="deletePost('${post.id}')"
-                title="Delete this post"
-                ${post.status !== 'pending' ? 'disabled' : ''}>
+                title="${post.status === 'scheduled' ? 'Scheduled in Buffer' : 'Remove from queue'}"
+                ${post.status === 'scheduled' ? 'disabled' : ''}>
           ✕
         </button>
       </div>
@@ -586,7 +626,7 @@ function getCardStatusClass(status) {
 function getStatusContent(post) {
   switch (post.status) {
     case 'pending':
-      return '⏳ Pending';
+      return '⏳ Ready to Schedule';
     case 'scheduling':
       return '<span class="status-spinner"></span> Scheduling...';
     case 'scheduled':
@@ -627,44 +667,48 @@ function onPostEdit(postId, textarea) {
 
 function deletePost(postId) {
   if (isScheduling) return;
+  const post = posts.find(p => p.id === postId);
+  if (post && post.status === 'scheduled') {
+    showToast('This post is already active in Buffer. Delete it directly in Buffer if needed.', 'info');
+    return;
+  }
+
   posts = posts.filter(p => p.id !== postId);
 
   // Recalculate times after deletion
   calculatePostingTimes();
   updatePostCountBadge();
   renderPosts();
-
-  if (posts.length === 0) {
-    goBack();
-  }
+  showToast('Post removed from queue.', 'info');
 }
 
 async function clearAllPosts() {
   if (isScheduling) return;
   if (posts.length === 0) return;
 
-  if (!confirm(`Are you sure you want to clear all ${posts.length} posts from your dashboard and queue?`)) {
+  const queuedOrPending = posts.filter(p => p.status !== 'scheduled');
+  if (queuedOrPending.length === 0) {
+    showToast('Only posts currently active in Buffer remain. They cannot be cleared from here.', 'info');
+    return;
+  }
+
+  if (!confirm(`Are you sure you want to clear your local queue (${queuedOrPending.length} post${queuedOrPending.length !== 1 ? 's' : ''})? Posts already in Buffer will remain intact.`)) {
     return;
   }
 
   try {
-    await fetch('/api/clear', { method: 'POST' });
+    await fetch('/api/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: activeChannelId }),
+    });
   } catch (err) {
     console.warn('Failed to clear server queue:', err);
   }
 
-  posts = [];
-  renderPosts();
-  updatePostCountBadge();
-  pasteSection.classList.remove('hidden');
-  controlsBar.classList.add('hidden');
-  postsGrid.classList.add('hidden');
-  if (btnCancelPaste) btnCancelPaste.classList.add('hidden');
-  btnSplit.textContent = '✂️ Split Posts';
-  pasteTextarea.value = '';
-  updatePasteCharCount();
-  showToast('All posts cleared.', 'info');
-  fetchQueueCount();
+  showToast('Local queue cleared. Preserving Buffer posts.', 'info');
+  await loadExistingPosts();
+  await fetchQueueCount();
 }
 
 // Make functions available globally for inline event handlers
@@ -678,7 +722,9 @@ async function scheduleAll() {
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
   if (pendingPosts.length === 0) {
-    showToast('All posts are already scheduled or queued. Click "➕ Add More Posts" to queue more!', 'info');
+    const scheduled = posts.filter(p => p.status === 'scheduled').length;
+    const queued = posts.filter(p => p.status === 'queued').length;
+    showToast(`All posts are already active (${scheduled} in Buffer, ${queued} queued). Paste more posts above to add to queue!`, 'info');
     return;
   }
 
@@ -701,6 +747,7 @@ async function scheduleAll() {
   if (btnAddMore) btnAddMore.disabled = true;
   btnClearAll.disabled = true;
   progressWrapper.classList.remove('hidden');
+  progressBar.style.width = '10%';
 
   // Build posts with their pre-calculated times
   const postsToSchedule = pendingPosts.map(p => ({
@@ -718,7 +765,11 @@ async function scheduleAll() {
     const response = await fetch('/api/schedule', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ posts: postsToSchedule, mode: 'append' }),
+      body: JSON.stringify({
+        posts: postsToSchedule,
+        mode: 'append',
+        channelId: activeChannelId,
+      }),
     });
 
     const result = await response.json();
@@ -734,15 +785,16 @@ async function scheduleAll() {
       if (r && r.status === 'scheduled') {
         post.status = 'scheduled';
         post.scheduledAt = new Date(r.scheduledAt);
+        post.inBuffer = true;
       } else if (r && r.status === 'queued') {
         post.status = 'queued';
         post.scheduledAt = new Date(r.scheduledAt);
+        post.inBuffer = false;
       } else {
         post.status = 'error';
         post.error = r ? r.error : 'Unknown error';
       }
       updateCardStatus(post);
-      // Animate progress
       const pct = Math.round(((i + 1) / pendingPosts.length) * 100);
       progressBar.style.width = `${pct}%`;
     });
@@ -759,8 +811,16 @@ async function scheduleAll() {
       showToast(`⚠️ ${scheduled} sent, ${queued} queued, ${failed} failed.`, 'error');
     }
 
+    // Hide progress bar after delay
+    setTimeout(() => {
+      progressWrapper.classList.add('hidden');
+      progressBar.style.width = '0%';
+    }, 1200);
+
     // Refresh queue count and stats
-    fetchQueueCount();
+    await fetchQueueCount();
+    updatePostCountBadge();
+    btnSplit.textContent = '➕ Add to Queue';
 
   } catch (err) {
     pendingPosts.forEach(p => {
@@ -771,6 +831,7 @@ async function scheduleAll() {
       }
     });
     showToast(`❌ ${err.message}`, 'error');
+    progressWrapper.classList.add('hidden');
   } finally {
     isScheduling = false;
     btnSchedule.disabled = false;
@@ -804,7 +865,8 @@ function updateCardStatus(post) {
 
 async function fetchQueueCount() {
   try {
-    const res = await fetch('/api/queue');
+    const url = activeChannelId ? `/api/queue?channelId=${activeChannelId}` : '/api/queue';
+    const res = await fetch(url);
     const data = await res.json();
     const bufferCount = data.count ?? '—';
     const pending = data.localQueue?.pending || 0;
@@ -835,21 +897,29 @@ async function fetchQueueCount() {
 
 async function loadExistingPosts() {
   try {
-    const res = await fetch('/api/posts');
+    const url = activeChannelId ? `/api/posts?channelId=${activeChannelId}` : '/api/posts';
+    const res = await fetch(url);
     const data = await res.json();
     if (data.posts && data.posts.length > 0) {
       posts = data.posts.map(p => ({
-        id: 'p_' + p.index,
+        id: p.id || ('p_' + p.index),
         index: p.index,
         text: p.text,
         status: p.status,
         scheduledAt: p.scheduledAt ? new Date(p.scheduledAt) : null,
         error: p.error,
+        inBuffer: p.inBuffer || false,
       }));
+      window.serverHighestScheduledAt = data.highestScheduledAt;
+      showPostsView();
+    } else {
+      posts = [];
       showPostsView();
     }
   } catch (err) {
     console.debug('No existing posts to restore:', err);
+    posts = [];
+    showPostsView();
   }
 }
 
@@ -875,6 +945,10 @@ async function fetchChannels() {
         selectChannel.appendChild(opt);
       });
     }
+
+    // Now that active channel is set, query queue and posts
+    await fetchQueueCount();
+    await loadExistingPosts();
   } catch (err) {
     console.warn('Failed to load Buffer channels:', err);
   }
@@ -898,13 +972,9 @@ async function onChannelChange() {
     if (res.ok && data.success) {
       activeChannelId = newChannelId;
       showToast(`Switched account to ${handle} 🐦`, 'success');
-      // Refresh queue count and scheduling time for the selected account
+      // Refresh queue count and load posts for the selected account
       await fetchQueueCount();
-      // Recalculate pending posts based on the new account's queue
-      if (posts.length > 0) {
-        calculatePostingTimes();
-        renderPosts();
-      }
+      await loadExistingPosts();
     } else {
       throw new Error(data.error || 'Failed to switch account');
     }
