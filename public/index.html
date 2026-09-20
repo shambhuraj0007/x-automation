@@ -50,6 +50,9 @@
           <span class="paste-info" id="paste-char-count">0 characters</span>
         </div>
         <div>
+          <button class="btn btn--ghost btn--sm hidden" id="btn-cancel-paste" title="Cancel and return to posts view">
+            ✕ Cancel
+          </button>
           <button class="btn btn--ghost btn--sm" id="btn-clear" title="Clear textarea">
             🗑️ Clear
           </button>
@@ -79,13 +82,13 @@
 
       <div class="controls-bar__actions">
         <span class="post-count-badge" id="post-count-badge">0 posts</span>
-        <button class="btn btn--ghost btn--sm" id="btn-back" title="Go back to paste view">
-          ← Back
+        <button class="btn btn--primary btn--sm" id="btn-add-more" title="Paste and add more posts to the queue">
+          ➕ Add More Posts
         </button>
         <button class="btn btn--ghost btn--sm" id="btn-clear-all" title="Remove all posts">
           🗑️ Clear All
         </button>
-        <button class="btn btn--success btn--lg" id="btn-schedule" title="Schedule all posts to Buffer">
+        <button class="btn btn--success btn--lg" id="btn-schedule" title="Schedule posts to Buffer">
           🚀 Schedule All
         </button>
       </div>

@@ -76,6 +76,68 @@ function saveBatch(posts) {
 }
 
 /**
+ * Append new posts to the local queue without overwriting existing ones.
+ * Assigns continuous 1-based indices.
+ *
+ * @param {Array<{text: string, scheduledAt: string}>} newPosts
+ */
+function appendBatch(newPosts) {
+  const queue = readQueue();
+  const existingPosts = queue.posts || [];
+  const startIndex = existingPosts.length;
+
+  const mapped = newPosts.map((p, i) => ({
+    index: startIndex + i + 1,
+    text: p.text,
+    scheduledAt: p.scheduledAt,
+    status: 'pending',
+    bufferPostId: null,
+    error: null,
+    scheduledToBufferAt: null,
+  }));
+
+  queue.posts = [...existingPosts, ...mapped];
+  queue.totalCount = queue.posts.length;
+  if (!queue.createdAt) queue.createdAt = new Date().toISOString();
+  writeQueue(queue);
+  logger.info(`PostQueue: appended ${newPosts.length} posts (total in queue: ${queue.posts.length})`);
+  return { queue, newItems: mapped };
+}
+
+/**
+ * Get the latest/highest scheduledAt time among all posts in the local queue.
+ * @returns {string|null} ISO date string, or null
+ */
+function getHighestScheduledTime() {
+  const queue = readQueue();
+  const posts = queue.posts || [];
+  let maxDate = null;
+
+  for (const post of posts) {
+    if (post.scheduledAt) {
+      const d = new Date(post.scheduledAt);
+      if (!isNaN(d.getTime())) {
+        if (!maxDate || d > maxDate) {
+          maxDate = d;
+        }
+      }
+    }
+  }
+
+  return maxDate ? maxDate.toISOString() : null;
+}
+
+/**
+ * Clear the queue.
+ */
+function clearQueue() {
+  const queue = { posts: [], createdAt: null, totalCount: 0 };
+  writeQueue(queue);
+  logger.info('PostQueue: queue cleared');
+  return queue;
+}
+
+/**
  * Get posts that are still pending (not yet sent to Buffer).
  * @returns {Array}
  */
@@ -145,6 +207,9 @@ function getStats() {
 module.exports = {
   BUFFER_MAX_QUEUE,
   saveBatch,
+  appendBatch,
+  getHighestScheduledTime,
+  clearQueue,
   getPendingPosts,
   getAllPosts,
   markScheduled,

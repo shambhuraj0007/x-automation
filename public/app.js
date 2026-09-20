@@ -31,7 +31,8 @@ const inputMinSpacing = $('#input-min-spacing');
 const inputMaxSpacing = $('#input-max-spacing');
 const inputStartTime  = $('#input-start-time');
 const postCountBadge  = $('#post-count-badge');
-const btnBack         = $('#btn-back');
+const btnAddMore      = $('#btn-add-more');
+const btnCancelPaste  = $('#btn-cancel-paste');
 const btnClearAll     = $('#btn-clear-all');
 const btnSchedule     = $('#btn-schedule');
 
@@ -56,9 +57,13 @@ document.addEventListener('DOMContentLoaded', () => {
   pasteTextarea.addEventListener('input', updatePasteCharCount);
   btnClear.addEventListener('click', clearTextarea);
   btnSplit.addEventListener('click', splitPosts);
-  btnBack.addEventListener('click', goBack);
+  if (btnAddMore) btnAddMore.addEventListener('click', openAddMore);
+  if (btnCancelPaste) btnCancelPaste.addEventListener('click', closeAddMore);
   btnClearAll.addEventListener('click', clearAllPosts);
   btnSchedule.addEventListener('click', scheduleAll);
+
+  // Load existing posts from server queue if any
+  loadExistingPosts();
 
   // Recalculate times when spacing or start time changes
   inputMinSpacing.addEventListener('input', () => {
@@ -153,27 +158,66 @@ function skipBlackout(date) {
 // ── Time Calculation ──────────────────────────────────────────────────────
 
 /**
+ * Find the highest (latest) scheduled time remaining across:
+ * 1. Posts currently in UI that have scheduledAt
+ * 2. Furthest post in Buffer (lastBufferScheduledAt)
+ * 3. Server's highestScheduledAt
+ */
+function getHighestScheduledRemainingTime() {
+  let highest = null;
+
+  for (const p of posts) {
+    if (p.scheduledAt) {
+      const d = new Date(p.scheduledAt);
+      if (!isNaN(d.getTime())) {
+        if (!highest || d > highest) {
+          highest = d;
+        }
+      }
+    }
+  }
+
+  if (lastBufferScheduledAt) {
+    const d = new Date(lastBufferScheduledAt);
+    if (!isNaN(d.getTime())) {
+      if (!highest || d > highest) {
+        highest = d;
+      }
+    }
+  }
+
+  if (window.serverHighestScheduledAt) {
+    const d = new Date(window.serverHighestScheduledAt);
+    if (!isNaN(d.getTime())) {
+      if (!highest || d > highest) {
+        highest = d;
+      }
+    }
+  }
+
+  return highest;
+}
+
+/**
  * Update the default start time:
- * If Buffer has posts in queue, start AFTER the furthest/last scheduled post in queue + minSpacing.
- * Otherwise start from now + minSpacing.
- * Skips the 2 AM - 6 AM blackout window.
+ * Start AFTER the highest scheduled remaining post in queue (Buffer or local) + minSpacing.
+ * Otherwise start from now + minSpacing. Skips 2 AM - 6 AM blackout window.
  */
 function updateStartTimeDefault() {
   if (userManuallySetStartTime) return;
 
   const minSpacing = parseInt(inputMinSpacing.value) || 60;
   let baseDate;
+  const highest = getHighestScheduledRemainingTime();
 
-  if (lastBufferScheduledAt && new Date(lastBufferScheduledAt) > new Date()) {
-    const lastDate = new Date(lastBufferScheduledAt);
-    baseDate = new Date(lastDate.getTime() + (minSpacing * 60 * 1000));
+  if (highest && highest > new Date()) {
+    baseDate = new Date(highest.getTime() + (minSpacing * 60 * 1000));
     baseDate = skipBlackout(baseDate);
 
     const label = $('#label-start-time');
     if (label) {
-      label.title = `Buffer has posts queued until ${formatDateTime(lastDate)}. New posts start after it.`;
-      const currentInQueue = queueCount.textContent.split('/')[0] || '';
-      label.innerHTML = `Start After <span style="font-size:0.68rem;color:#38bdf8;font-weight:500;">(after #${currentInQueue} in queue)</span>`;
+      label.title = `Queue has posts scheduled until ${formatDateTime(highest)}. Next posts start after it.`;
+      label.innerHTML = `Start After <span style="font-size:0.68rem;color:#38bdf8;font-weight:500;">(after queue @ ${formatTimeOnly(highest)})</span>`;
     }
   } else {
     const now = new Date();
@@ -233,7 +277,7 @@ function recalculateTimes() {
 
 /**
  * Smart splitter that handles multiple formats:
- *  1. **N.** numbered with --- separators (the format from the user's example)
+ *  1. **N.** numbered with --- separators
  *  2. N. simple numbered
  *  3. --- separators only
  *  4. Double-newline separated
@@ -297,25 +341,69 @@ function splitPosts() {
       .trim();
   }).filter(s => s.length > 0);
 
-  // Create post objects
-  posts = splitTexts.map((text) => ({
-    id: generateId(),
-    text,
-    status: 'pending',
-    scheduledAt: null,
-  }));
+  const minSpacing = parseInt(inputMinSpacing.value) || 60;
+  const maxSpacing = parseInt(inputMaxSpacing.value) || 90;
 
-  // Update start time based on last post in Buffer before calculating
-  updateStartTimeDefault();
-  calculatePostingTimes();
+  if (posts.length > 0) {
+    // ── APPEND MODE: Adding more posts to exceed count ──
+    const highestTime = getHighestScheduledRemainingTime();
+    let baseTime;
+    if (highestTime && highestTime > new Date()) {
+      baseTime = skipBlackout(new Date(highestTime.getTime() + randomMinutes(minSpacing, maxSpacing) * 60 * 1000));
+    } else {
+      const startTimeVal = inputStartTime.value ? new Date(inputStartTime.value) : new Date();
+      baseTime = skipBlackout(startTimeVal);
+    }
 
-  showToast(`✂️ Split into ${posts.length} posts`, 'success');
+    const startIndex = posts.length;
+    const newPostObjects = splitTexts.map((text, i) => {
+      let scheduledAt;
+      if (i === 0) {
+        scheduledAt = new Date(baseTime.getTime());
+      } else {
+        const offset = randomMinutes(minSpacing, maxSpacing) * 60 * 1000;
+        baseTime = skipBlackout(new Date(baseTime.getTime() + offset));
+        scheduledAt = new Date(baseTime.getTime());
+      }
+      return {
+        id: generateId(),
+        index: startIndex + i + 1,
+        text,
+        status: 'pending',
+        scheduledAt,
+      };
+    });
 
-  if (lastBufferScheduledAt && new Date(lastBufferScheduledAt) > new Date()) {
-    const lastDate = new Date(lastBufferScheduledAt);
-    setTimeout(() => {
-      showToast(`🕐 Buffer has posts until ${formatTimeOnly(lastDate)}. First new post starts at ${formatTimeOnly(posts[0].scheduledAt)}.`, 'info');
-    }, 600);
+    posts = [...posts, ...newPostObjects];
+
+    showToast(`➕ Appended ${newPostObjects.length} posts! Total now: ${posts.length}`, 'success');
+    if (highestTime) {
+      setTimeout(() => {
+        showToast(`🕐 Continuing schedule after ${formatDateTime(highestTime)}. First new post starts at ${formatTimeOnly(newPostObjects[0].scheduledAt)}.`, 'info');
+      }, 700);
+    }
+  } else {
+    // ── INITIAL BATCH: First batch of posts ──
+    updateStartTimeDefault();
+
+    posts = splitTexts.map((text, i) => ({
+      id: generateId(),
+      index: i + 1,
+      text,
+      status: 'pending',
+      scheduledAt: null,
+    }));
+
+    calculatePostingTimes();
+
+    showToast(`✂️ Split into ${posts.length} posts`, 'success');
+
+    const highest = getHighestScheduledRemainingTime();
+    if (highest && highest > new Date()) {
+      setTimeout(() => {
+        showToast(`🕐 Buffer queue has posts until ${formatTimeOnly(highest)}. First new post starts at ${formatTimeOnly(posts[0].scheduledAt)}.`, 'info');
+      }, 700);
+    }
   }
 
   showPostsView();
@@ -328,30 +416,39 @@ function showPostsView() {
   controlsBar.classList.remove('hidden');
   postsGrid.classList.remove('hidden');
   emptyState.classList.add('hidden');
+  if (btnCancelPaste) btnCancelPaste.classList.add('hidden');
+  btnSplit.textContent = '✂️ Split Posts';
 
   updatePostCountBadge();
   renderPosts();
 }
 
-function goBack() {
-  if (isScheduling) {
-    showToast('Cannot go back while scheduling is in progress.', 'error');
-    return;
-  }
-  pasteSection.classList.remove('hidden');
-  controlsBar.classList.add('hidden');
-  postsGrid.classList.add('hidden');
-  progressWrapper.classList.add('hidden');
-  emptyState.classList.add('hidden');
-}
-
-function clearAllPosts() {
+function openAddMore() {
   if (isScheduling) return;
-  posts = [];
-  renderPosts();
-  updatePostCountBadge();
-  goBack();
-  showToast('All posts cleared.', 'info');
+  pasteSection.classList.remove('hidden');
+  if (btnCancelPaste) btnCancelPaste.classList.remove('hidden');
+  btnSplit.textContent = '➕ Add to Queue';
+
+  const highest = getHighestScheduledRemainingTime();
+  const hint = document.querySelector('.paste-section__hint');
+  if (hint) {
+    if (highest) {
+      hint.innerHTML = `Adding more posts (currently <strong>${posts.length}</strong> in queue). New posts will schedule starting after <strong>${formatDateTime(highest)}</strong>.`;
+    } else {
+      hint.textContent = 'Paste more posts to add to your queue.';
+    }
+  }
+
+  pasteTextarea.value = '';
+  updatePasteCharCount();
+  pasteSection.scrollIntoView({ behavior: 'smooth' });
+  pasteTextarea.focus();
+}
+
+function closeAddMore() {
+  if (posts.length > 0) {
+    pasteSection.classList.add('hidden');
+  }
 }
 
 function updatePostCountBadge() {
@@ -411,10 +508,12 @@ function createPostCard(post, index) {
   // Relative time from now
   const relativeTime = post.scheduledAt ? getRelativeTime(post.scheduledAt) : '';
 
+  const displayNum = post.index || (index + 1);
+
   card.innerHTML = `
     <div class="post-card__header">
       <div class="post-card__header-left">
-        <div class="post-card__number">${index + 1}</div>
+        <div class="post-card__number">${displayNum}</div>
         <div class="post-card__time-badge" title="${timeDisplay}">
           <span class="post-card__time-icon">🕐</span>
           <span class="post-card__time-text">${timeShort}</span>
@@ -532,6 +631,34 @@ function deletePost(postId) {
   }
 }
 
+async function clearAllPosts() {
+  if (isScheduling) return;
+  if (posts.length === 0) return;
+
+  if (!confirm(`Are you sure you want to clear all ${posts.length} posts from your dashboard and queue?`)) {
+    return;
+  }
+
+  try {
+    await fetch('/api/clear', { method: 'POST' });
+  } catch (err) {
+    console.warn('Failed to clear server queue:', err);
+  }
+
+  posts = [];
+  renderPosts();
+  updatePostCountBadge();
+  pasteSection.classList.remove('hidden');
+  controlsBar.classList.add('hidden');
+  postsGrid.classList.add('hidden');
+  if (btnCancelPaste) btnCancelPaste.classList.add('hidden');
+  btnSplit.textContent = '✂️ Split Posts';
+  pasteTextarea.value = '';
+  updatePasteCharCount();
+  showToast('All posts cleared.', 'info');
+  fetchQueueCount();
+}
+
 // Make functions available globally for inline event handlers
 window.deletePost = deletePost;
 window.onPostEdit = onPostEdit;
@@ -543,13 +670,13 @@ async function scheduleAll() {
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
   if (pendingPosts.length === 0) {
-    showToast('No pending posts to schedule.', 'error');
+    showToast('All posts are already scheduled or queued. Click "➕ Add More Posts" to queue more!', 'info');
     return;
   }
 
   // Validate spacing
-  const minSpacing = parseInt(inputMinSpacing.value) || 45;
-  const maxSpacing = parseInt(inputMaxSpacing.value) || 80;
+  const minSpacing = parseInt(inputMinSpacing.value) || 60;
+  const maxSpacing = parseInt(inputMaxSpacing.value) || 90;
   if (minSpacing > maxSpacing) {
     showToast('Min spacing cannot be greater than max spacing.', 'error');
     return;
@@ -563,7 +690,7 @@ async function scheduleAll() {
 
   isScheduling = true;
   btnSchedule.disabled = true;
-  btnBack.disabled = true;
+  if (btnAddMore) btnAddMore.disabled = true;
   btnClearAll.disabled = true;
   progressWrapper.classList.remove('hidden');
 
@@ -573,7 +700,7 @@ async function scheduleAll() {
     scheduledAt: p.scheduledAt.toISOString(),
   }));
 
-  // Mark all as scheduling
+  // Mark all pending as scheduling
   pendingPosts.forEach(p => {
     p.status = 'scheduling';
     updateCardStatus(p);
@@ -583,7 +710,7 @@ async function scheduleAll() {
     const response = await fetch('/api/schedule', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ posts: postsToSchedule }),
+      body: JSON.stringify({ posts: postsToSchedule, mode: 'append' }),
     });
 
     const result = await response.json();
@@ -624,7 +751,7 @@ async function scheduleAll() {
       showToast(`⚠️ ${scheduled} sent, ${queued} queued, ${failed} failed.`, 'error');
     }
 
-    // Refresh queue count
+    // Refresh queue count and stats
     fetchQueueCount();
 
   } catch (err) {
@@ -639,7 +766,7 @@ async function scheduleAll() {
   } finally {
     isScheduling = false;
     btnSchedule.disabled = false;
-    btnBack.disabled = false;
+    if (btnAddMore) btnAddMore.disabled = false;
     btnClearAll.disabled = false;
   }
 }
@@ -665,7 +792,7 @@ function updateCardStatus(post) {
   }
 }
 
-// ── Queue Count ───────────────────────────────────────────────────────────
+// ── Queue Count & Persistence ─────────────────────────────────────────────
 
 async function fetchQueueCount() {
   try {
@@ -674,6 +801,7 @@ async function fetchQueueCount() {
     const bufferCount = data.count ?? '—';
     const pending = data.localQueue?.pending || 0;
     lastBufferScheduledAt = data.lastScheduledAt || null;
+    window.serverHighestScheduledAt = data.highestScheduledAt || null;
 
     if (data.minSpacing && !inputMinSpacing.dataset.userEdited) {
       inputMinSpacing.value = data.minSpacing;
@@ -689,10 +817,31 @@ async function fetchQueueCount() {
 
     updateStartTimeDefault();
     if (posts.length > 0 && !userManuallySetStartTime) {
-      recalculateTimes();
+      const hasPending = posts.some(p => p.status === 'pending');
+      if (hasPending) recalculateTimes();
     }
   } catch {
     queueCount.textContent = '—';
+  }
+}
+
+async function loadExistingPosts() {
+  try {
+    const res = await fetch('/api/posts');
+    const data = await res.json();
+    if (data.posts && data.posts.length > 0) {
+      posts = data.posts.map(p => ({
+        id: 'p_' + p.index,
+        index: p.index,
+        text: p.text,
+        status: p.status,
+        scheduledAt: p.scheduledAt ? new Date(p.scheduledAt) : null,
+        error: p.error,
+      }));
+      showPostsView();
+    }
+  } catch (err) {
+    console.debug('No existing posts to restore:', err);
   }
 }
 

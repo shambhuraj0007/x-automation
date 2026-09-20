@@ -136,15 +136,25 @@ router.post('/schedule', async (req, res) => {
 
     const dryRun = process.env.DRY_RUN === 'true';
 
+    const mode = req.body.mode || 'append'; // 'append' by default so we never lose existing queue
+
     // 1. Apply blackout to all scheduled times
     const cleanedPosts = posts.map(p => ({
       text: p.text,
       scheduledAt: skipBlackout(new Date(p.scheduledAt)).toISOString(),
     }));
 
-    // 2. Save ALL posts to local queue
-    postQueue.saveBatch(cleanedPosts);
-    logger.info(`API: saved ${cleanedPosts.length} posts to local queue`);
+    // 2. Save / Append posts to local queue
+    let addedItems = [];
+    if (mode === 'replace') {
+      postQueue.saveBatch(cleanedPosts);
+      addedItems = postQueue.getAllPosts();
+      logger.info(`API: replaced local queue with ${cleanedPosts.length} posts`);
+    } else {
+      const appendResult = postQueue.appendBatch(cleanedPosts);
+      addedItems = appendResult.newItems;
+      logger.info(`API: appended ${cleanedPosts.length} posts to local queue (total: ${postQueue.getStats().total})`);
+    }
 
     // 3. Check current Buffer queue to know how many slots are available
     let currentBufferCount = 0;
@@ -158,8 +168,8 @@ router.post('/schedule', async (req, res) => {
     }
 
     const availableSlots = Math.max(0, postQueue.BUFFER_MAX_QUEUE - currentBufferCount);
-    const toScheduleNow = cleanedPosts.slice(0, availableSlots);
-    const queuedForLater = cleanedPosts.length - toScheduleNow.length;
+    const toScheduleNow = addedItems.slice(0, availableSlots);
+    const queuedForLater = addedItems.length - toScheduleNow.length;
 
     logger.info(
       `API: Buffer has ${currentBufferCount}/10 posts (last at ${lastScheduledAt || 'none'}). ` +
@@ -171,7 +181,7 @@ router.post('/schedule', async (req, res) => {
 
     for (let i = 0; i < toScheduleNow.length; i++) {
       const post = toScheduleNow[i];
-      const postIndex = i + 1; // 1-based index in the queue
+      const postIndex = post.index; // continuous 1-based index
 
       if (dryRun) {
         logger.info(
@@ -217,11 +227,11 @@ router.post('/schedule', async (req, res) => {
     }
 
     // 5. Build response for remaining queued posts
-    for (let i = toScheduleNow.length; i < cleanedPosts.length; i++) {
+    for (let i = toScheduleNow.length; i < addedItems.length; i++) {
       results.push({
-        index: i + 1,
+        index: addedItems[i].index,
         success: true,
-        scheduledAt: cleanedPosts[i].scheduledAt,
+        scheduledAt: addedItems[i].scheduledAt,
         status: 'queued',  // waiting for auto-fill cron
       });
     }
@@ -255,12 +265,26 @@ router.get('/queue', async (req, res) => {
   try {
     const info = await getBufferQueueInfo();
     const stats = postQueue.getStats();
+    const localHighest = postQueue.getHighestScheduledTime();
     const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
     const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
 
+    // Find the highest/latest scheduled time between Buffer and local queue
+    let highestScheduledAt = null;
+    const candidates = [info.lastScheduledAt, localHighest].filter(Boolean);
+    for (const c of candidates) {
+      const d = new Date(c);
+      if (!isNaN(d.getTime())) {
+        if (!highestScheduledAt || d > new Date(highestScheduledAt)) {
+          highestScheduledAt = d.toISOString();
+        }
+      }
+    }
+
     res.json({
       count: info.count,
-      lastScheduledAt: info.lastScheduledAt,
+      lastScheduledAt: info.lastScheduledAt, // furthest in Buffer
+      highestScheduledAt,                   // furthest overall (Buffer or local queue)
       minSpacing,
       maxSpacing,
       localQueue: stats,
@@ -270,6 +294,7 @@ router.get('/queue', async (req, res) => {
     res.json({
       count: null,
       lastScheduledAt: null,
+      highestScheduledAt: null,
       minSpacing: 60,
       maxSpacing: 90,
       localQueue: postQueue.getStats(),
@@ -283,7 +308,15 @@ router.get('/queue', async (req, res) => {
 router.get('/posts', (req, res) => {
   const posts = postQueue.getAllPosts();
   const stats = postQueue.getStats();
-  res.json({ posts, stats });
+  const highestScheduledAt = postQueue.getHighestScheduledTime();
+  res.json({ posts, stats, highestScheduledAt });
+});
+
+// ── POST /api/clear ──────────────────────────────────────────────────────
+
+router.post('/clear', (req, res) => {
+  const cleared = postQueue.clearQueue();
+  res.json({ success: true, message: 'Local queue cleared', queue: cleared });
 });
 
 module.exports = router;
