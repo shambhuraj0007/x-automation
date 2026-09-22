@@ -3,7 +3,7 @@
  * Core queue monitoring and refill logic.
  *
  * Implements:
- *  1. 4-hour cron scheduler
+ *  1. 6-hour cron scheduler
  *     → triggers refill when posts ≤ QUEUE_SOFT_THRESHOLD (default: 3)
  *  2. Startup queue check
  *     → to ensure initial population of the buffer
@@ -78,18 +78,18 @@ async function _doRefill(reason) {
 
 
 /**
- * Start a cron job that runs every 4 hours as a safety net.
+ * Start a cron job that runs every 6 hours as a safety net.
  * Refills if posts ≤ QUEUE_SOFT_THRESHOLD.
  */
 function startFallbackCron() {
   const softThreshold = parseInt(process.env.QUEUE_SOFT_THRESHOLD || '3', 10);
 
-  logger.info(`Scheduler: starting 4-hour fallback cron (soft threshold ≤${softThreshold})`);
+  logger.info(`Scheduler: starting 6-hour fallback cron (soft threshold ≤${softThreshold})`);
 
-  // Every 4 hours: 0 */4 * * *
-  const task = cron.schedule('0 */4 * * *', () => {
-    logger.info('Scheduler [4hr-cron]: ⏰ Running scheduled health check...');
-    checkAndRefill({ threshold: softThreshold, reason: '4hr-cron' });
+  // Every 6 hours: 0 */6 * * *
+  const task = cron.schedule('0 */6 * * *', () => {
+    logger.info('Scheduler [6hr-cron]: ⏰ Running scheduled health check...');
+    checkAndRefill({ threshold: softThreshold, reason: '6hr-cron' });
   }, { scheduled: true, timezone: 'UTC' });
 
   return task;

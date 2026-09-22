@@ -1,19 +1,20 @@
 /**
  * src/autoFill.js
- * 4-hour cron that keeps Buffer queue at 10 posts by pulling from the local queue.
+ * 6-hour cron that keeps Buffer queue at 10 posts by pulling from the local queue.
  *
- * Every 4 hours:
- *   1. Check how many posts are currently in Buffer queue
- *   2. If < 10, pull enough pending posts from local queue to fill it
- *   3. Schedule those posts to Buffer with proper time spacing
- *   4. Skip 2 AM – 6 AM posting window
+ * Every 6 hours:
+ *   1. Clean up published posts from local queue (time-based + API-based)
+ *   2. Check how many posts are currently in Buffer queue
+ *   3. If < 10, pull enough pending posts from local queue to fill it
+ *   4. Schedule those posts to Buffer with proper time spacing
+ *   5. Skip 2 AM – 6 AM posting window
  */
 
 'use strict';
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount, getActiveChannelId } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts } = require('./buffer');
 const postQueue = require('./postQueue');
 const { schedulePostToBuffer } = require('./api');
 
@@ -50,10 +51,72 @@ function nextPostTime(baseTime, minSpacingMin, maxSpacingMin) {
   return next;
 }
 
+// ── Cleanup logic ───────────────────────────────────────────────────────
+
+/**
+ * Clean up posts that have been published to Twitter by Buffer.
+ * Uses two approaches:
+ *   1. Time-based: if scheduledAt is in the past, the post has been published
+ *   2. API-based: cross-reference local bufferPostIds with Buffer's sent posts
+ */
+async function cleanupPublishedPosts() {
+  const channelId = getActiveChannelId();
+  const scheduled = postQueue.getScheduledPosts(channelId);
+
+  if (scheduled.length === 0) {
+    logger.debug('Cleanup: no scheduled posts in local queue — nothing to clean');
+    return;
+  }
+
+  logger.info(`Cleanup: checking ${scheduled.length} scheduled post(s) for publish status...`);
+
+  const now = new Date();
+  const indicesToMarkPublished = [];
+
+  // ── Approach 1: Time-based ──
+  // If a post's scheduledAt is in the past, Buffer has already published it
+  for (const post of scheduled) {
+    if (post.scheduledAt) {
+      const dueAt = new Date(post.scheduledAt);
+      if (!isNaN(dueAt.getTime()) && dueAt < now) {
+        indicesToMarkPublished.push(post.index);
+        logger.debug(`Cleanup: post #${post.index} scheduledAt ${post.scheduledAt} is in the past — marking published`);
+      }
+    }
+  }
+
+  // ── Approach 2: API-based ──
+  // Query Buffer for sent posts and match by bufferPostId
+  try {
+    const sentPosts = await getSentPosts(channelId);
+    const sentIds = new Set(sentPosts.map(p => p.id));
+
+    for (const post of scheduled) {
+      if (post.bufferPostId && sentIds.has(post.bufferPostId)) {
+        if (!indicesToMarkPublished.includes(post.index)) {
+          indicesToMarkPublished.push(post.index);
+          logger.debug(`Cleanup: post #${post.index} (buffer id: ${post.bufferPostId}) found in Buffer sent posts — marking published`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(`Cleanup: could not fetch sent posts from Buffer API — ${err.message}. Using time-based cleanup only.`);
+  }
+
+  // ── Mark and remove ──
+  if (indicesToMarkPublished.length > 0) {
+    postQueue.markPublished(indicesToMarkPublished);
+    const removed = postQueue.removePublishedPosts(channelId);
+    logger.info(`Cleanup: ✅ cleaned up ${removed} published post(s) from local queue`);
+  } else {
+    logger.info('Cleanup: no published posts to clean up');
+  }
+}
+
 // ── Auto-fill logic ─────────────────────────────────────────────────────
 
 /**
- * Check Buffer queue and fill it up to 10 from the local queue.
+ * Clean up published posts, then check Buffer queue and fill it up to 10 from the local queue.
  */
 async function autoFillQueue() {
   if (isRefilling) {
@@ -64,6 +127,8 @@ async function autoFillQueue() {
   isRefilling = true;
 
   try {
+    // Clean up posts that have already been published to Twitter
+    await cleanupPublishedPosts();
     // 1. Check current Buffer queue count and last scheduled time
     const bufferInfo = await getBufferQueueInfo();
     const currentCount = bufferInfo.count;
@@ -205,17 +270,17 @@ async function autoFillQueue() {
 // ── Cron ─────────────────────────────────────────────────────────────────
 
 /**
- * Start the 4-hour auto-fill cron. Runs at minute 0 every 4 hours.
+ * Start the 6-hour auto-fill cron. Runs at minute 0 every 6 hours.
  */
 function startAutoFillCron() {
-  logger.info('AutoFill: starting 4-hour cron (keeps Buffer at 10 posts)');
+  logger.info('AutoFill: starting 6-hour cron (keeps Buffer at 10 posts)');
 
-  const task = cron.schedule('0 */4 * * *', () => {
-    logger.info('AutoFill: ⏰ 4-hour cron triggered — checking queue...');
+  const task = cron.schedule('0 */6 * * *', () => {
+    logger.info('AutoFill: ⏰ 6-hour cron triggered — checking queue...');
     autoFillQueue();
   }, { scheduled: true, timezone: 'Asia/Kolkata' });
 
   return task;
 }
 
-module.exports = { startAutoFillCron, autoFillQueue, skipBlackout, nextPostTime };
+module.exports = { startAutoFillCron, autoFillQueue, cleanupPublishedPosts, skipBlackout, nextPostTime };

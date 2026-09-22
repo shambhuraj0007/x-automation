@@ -404,6 +404,65 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
   );
 }
 
+/**
+ * Fetch posts that Buffer has already published (status: "sent") to Twitter/X.
+ * These are posts that were scheduled and have been successfully tweeted.
+ *
+ * @param {string} [targetChannelId] - Optional specific channel ID to query
+ * @returns {Promise<Array<{id: string, dueAt: string, text: string, status: string}>>}
+ */
+async function getSentPosts(targetChannelId) {
+  const orgId = process.env.BUFFER_ORG_ID;
+  const channelId = targetChannelId || getActiveChannelId();
+
+  if (!orgId || !channelId) {
+    throw new Error(
+      'BUFFER_ORG_ID and BUFFER_CHANNEL_ID must be set in .env.'
+    );
+  }
+
+  return pRetry(
+    async () => {
+      const data = await gql(`
+        query {
+          posts(
+            first: 100
+            input: {
+              organizationId: "${orgId}"
+              filter: {
+                status: [sent]
+                channelIds: ["${channelId}"]
+              }
+            }
+          ) {
+            edges {
+              node {
+                id
+                dueAt
+                status
+                text
+              }
+            }
+          }
+        }
+      `);
+
+      const edges = data.posts?.edges ?? [];
+      const sentPosts = edges.map(e => e.node);
+
+      logger.debug(`Buffer: found ${sentPosts.length} sent/published post(s)`);
+      return sentPosts;
+    },
+    {
+      retries: 2,
+      minTimeout: 2000,
+      onFailedAttempt: (err) => {
+        logger.warn(`Buffer getSentPosts attempt ${err.attemptNumber} failed: ${err.message}`);
+      },
+    }
+  );
+}
+
 module.exports = {
   getBufferQueueInfo,
   getQueueCount,
@@ -413,4 +472,5 @@ module.exports = {
   getChannels,
   getActiveChannelId,
   setActiveChannelId,
+  getSentPosts,
 };

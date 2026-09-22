@@ -227,6 +227,59 @@ function getStats(channelId) {
   };
 }
 
+/**
+ * Get posts that have been scheduled to Buffer (candidates for cleanup once published).
+ * @param {string} [channelId]
+ * @returns {Array}
+ */
+function getScheduledPosts(channelId) {
+  const queue = readQueue();
+  const posts = queue.posts || [];
+  return posts.filter(p => p.status === 'scheduled' && (!channelId || !p.channelId || p.channelId === channelId));
+}
+
+/**
+ * Mark specific posts as published (already sent to Twitter by Buffer).
+ * @param {number[]} indices - The 1-based post indices to mark
+ */
+function markPublished(indices) {
+  const queue = readQueue();
+  indices.forEach((idx) => {
+    const post = queue.posts.find(p => p.index === idx);
+    if (post) {
+      post.status = 'published';
+      post.publishedAt = new Date().toISOString();
+    }
+  });
+  writeQueue(queue);
+  if (indices.length > 0) {
+    logger.info(`PostQueue: marked ${indices.length} post(s) as published`);
+  }
+}
+
+/**
+ * Remove all posts with status "published" from the queue file.
+ * This frees up disk space and keeps the queue clean.
+ * @param {string} [channelId]
+ * @returns {number} Number of posts removed
+ */
+function removePublishedPosts(channelId) {
+  const queue = readQueue();
+  const before = queue.posts.length;
+  queue.posts = queue.posts.filter(p => {
+    if (p.status !== 'published') return true;
+    if (channelId && p.channelId && p.channelId !== channelId) return true;
+    return false;
+  });
+  const removed = before - queue.posts.length;
+  queue.totalCount = queue.posts.length;
+  writeQueue(queue);
+  if (removed > 0) {
+    logger.info(`PostQueue: removed ${removed} published post(s) from queue`);
+  }
+  return removed;
+}
+
 module.exports = {
   BUFFER_MAX_QUEUE,
   saveBatch,
@@ -234,9 +287,12 @@ module.exports = {
   getHighestScheduledTime,
   clearQueue,
   getPendingPosts,
+  getScheduledPosts,
   getAllPosts,
   markScheduled,
+  markPublished,
   markError,
+  removePublishedPosts,
   getStats,
   readQueue,
 };

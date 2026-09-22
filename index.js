@@ -4,7 +4,7 @@
  * Entry point. Starts an Express server that:
  *  1. Serves the web dashboard (public/)
  *  2. Exposes API routes for scheduling posts to Buffer
- *  3. Runs a 4-hour auto-fill cron to keep Buffer at 10 posts
+ *  3. Runs a 6-hour auto-fill cron to keep Buffer at 10 posts
  *
  * Usage:
  *   node index.js              → start the dashboard + auto-fill
@@ -41,7 +41,7 @@ function printBanner() {
   logger.info(`  Spacing    : ${process.env.MIN_SPACING_MINUTES || 60}–${process.env.MAX_SPACING_MINUTES || 90} min`);
   logger.info(`  Buffer max : 10 posts`);
   logger.info(`  Blackout   : 2:00 AM – 6:00 AM (no posting)`);
-  logger.info(`  Auto-fill  : every 4 hours`);
+  logger.info(`  Auto-fill  : every 6 hours`);
   logger.info(`  Mode       : ${dryRun ? '🟡 DRY RUN (no real Buffer calls)' : '🟢 LIVE'}`);
   logger.info('═══════════════════════════════════════════════════');
 }
