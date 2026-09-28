@@ -54,14 +54,8 @@ document.addEventListener('DOMContentLoaded', () => {
   now.setMinutes(now.getMinutes() + 60);
   inputStartTime.value = toLocalDateTimeString(skipBlackout(now));
 
-  // Load available channels into dropdown
+  // Load available channels into dropdown, then fetch queue count and existing posts sequentially
   fetchChannels();
-
-  // Query Buffer queue and last scheduled post time
-  fetchQueueCount();
-
-  // Load existing posts from Buffer and server queue
-  loadExistingPosts();
 
   // Event listeners
   if (selectChannel) {
@@ -246,24 +240,51 @@ function updateStartTimeDefault() {
 }
 
 /**
- * Calculate posting times for all posts based on spacing and start time.
+ * Calculate posting times for pending posts based on spacing and start time.
  * Uses random spacing between min and max (default 60–90 min). Skips 2 AM – 6 AM blackout window.
- * The times are stored on each post object so they can be sent to the backend.
+ * Preserves already scheduled/sent posts and ensures new posts start AFTER existing ones.
  */
 function calculatePostingTimes() {
   const minSpacing = parseInt(inputMinSpacing.value) || 60;
   const maxSpacing = parseInt(inputMaxSpacing.value) || 90;
 
-  if (!inputStartTime.value) {
-    updateStartTimeDefault();
+  // Find the highest scheduled time from already scheduled Buffer/local posts
+  let highestScheduled = null;
+  posts.forEach(p => {
+    if (p.status !== 'pending' && p.scheduledAt) {
+      const d = new Date(p.scheduledAt);
+      if (!isNaN(d.getTime()) && (!highestScheduled || d > highestScheduled)) {
+        highestScheduled = d;
+      }
+    }
+  });
+
+  if (lastBufferScheduledAt) {
+    const d = new Date(lastBufferScheduledAt);
+    if (!isNaN(d.getTime()) && (!highestScheduled || d > highestScheduled)) {
+      highestScheduled = d;
+    }
   }
 
-  const startTime = inputStartTime.value ? new Date(inputStartTime.value) : new Date();
-  let baseTime = skipBlackout(new Date(startTime.getTime()));
+  let baseTime;
+  if (highestScheduled && highestScheduled > new Date()) {
+    const offset = randomMinutes(minSpacing, maxSpacing) * 60 * 1000;
+    baseTime = skipBlackout(new Date(highestScheduled.getTime() + offset));
+  } else {
+    if (!inputStartTime.value) {
+      updateStartTimeDefault();
+    }
+    const startTime = inputStartTime.value ? new Date(inputStartTime.value) : new Date();
+    baseTime = skipBlackout(new Date(startTime.getTime()));
+  }
 
-  posts.forEach((post, i) => {
-    if (i === 0) {
+  let isFirstPending = true;
+  posts.forEach((post) => {
+    if (post.status !== 'pending') return; // Never overwrite already scheduled posts!
+
+    if (isFirstPending) {
       post.scheduledAt = new Date(baseTime.getTime());
+      isFirstPending = false;
     } else {
       const offset = randomMinutes(minSpacing, maxSpacing) * 60 * 1000;
       baseTime = skipBlackout(new Date(baseTime.getTime() + offset));
@@ -824,7 +845,7 @@ async function scheduleAll() {
     if (failed === 0 && queued === 0) {
       showToast(`🚀 All ${scheduled} posts sent to Buffer!`, 'success');
     } else if (failed === 0) {
-      showToast(`✅ ${scheduled} sent to Buffer now, ${queued} queued for auto-fill (every 4h)`, 'success');
+      showToast(`✅ ${scheduled} sent to Buffer now, ${queued} queued for auto-fill (every 3h)`, 'success');
     } else {
       showToast(`⚠️ ${scheduled} sent, ${queued} queued, ${failed} failed.`, 'error');
     }

@@ -461,6 +461,48 @@ async function getSentPosts(targetChannelId) {
       },
     }
   );
+/**
+ * Fetch posts that failed to publish on Buffer/Twitter (status: "error").
+ *
+ * @param {string} [targetChannelId] - Optional specific channel ID to query
+ * @returns {Promise<Array<{id: string, dueAt: string, text: string, status: string}>>}
+ */
+async function getFailedPosts(targetChannelId) {
+  const orgId = process.env.BUFFER_ORG_ID;
+  const channelId = targetChannelId || getActiveChannelId();
+
+  if (!orgId || !channelId) return [];
+
+  try {
+    const data = await gql(`
+      query {
+        posts(
+          first: 50
+          input: {
+            organizationId: "${orgId}"
+            filter: {
+              status: [error]
+              channelIds: ["${channelId}"]
+            }
+          }
+        ) {
+          edges {
+            node {
+              id
+              dueAt
+              status
+              text
+            }
+          }
+        }
+      }
+    `);
+    const edges = data.posts?.edges ?? [];
+    return edges.map(e => e.node);
+  } catch (err) {
+    logger.debug(`Buffer getFailedPosts notice: ${err.message}`);
+    return [];
+  }
 }
 
 module.exports = {
@@ -473,4 +515,5 @@ module.exports = {
   getActiveChannelId,
   setActiveChannelId,
   getSentPosts,
+  getFailedPosts,
 };

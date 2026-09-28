@@ -32,12 +32,31 @@ const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
 
 const BLACKOUT_START = 2;
 const BLACKOUT_END = 6;
+const TIMEZONE = process.env.TIMEZONE || 'Asia/Kolkata';
 
-function skipBlackout(date) {
-  const d = new Date(date.getTime());
-  const hour = d.getHours();
+function getHourInTimezone(date, tz = TIMEZONE) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(date);
+    const hourPart = parts.find(p => p.type === 'hour');
+    return hourPart ? parseInt(hourPart.value, 10) : date.getHours();
+  } catch {
+    return date.getHours();
+  }
+}
+
+function skipBlackout(date, tz = TIMEZONE) {
+  let d = new Date(date.getTime());
+  let hour = getHourInTimezone(d, tz);
   if (hour >= BLACKOUT_START && hour < BLACKOUT_END) {
-    d.setHours(BLACKOUT_END, 0, 0, 0);
+    while (hour >= BLACKOUT_START && hour < BLACKOUT_END) {
+      d = new Date(d.getTime() + 30 * 60 * 1000);
+      hour = getHourInTimezone(d, tz);
+    }
+    d.setMinutes(0, 0, 0);
   }
   return d;
 }
@@ -138,11 +157,60 @@ router.post('/schedule', async (req, res) => {
 
     const mode = req.body.mode || 'append'; // 'append' by default so we never lose existing queue
 
-    // 1. Apply blackout to all scheduled times
-    const cleanedPosts = posts.map(p => ({
-      text: p.text,
-      scheduledAt: skipBlackout(new Date(p.scheduledAt)).toISOString(),
-    }));
+    // 1. Check current Buffer queue to know how many slots are available and latest scheduled post
+    let currentBufferCount = 0;
+    let lastScheduledAt = null;
+    try {
+      const bufferInfo = await getBufferQueueInfo(channelId);
+      currentBufferCount = bufferInfo.count;
+      lastScheduledAt = bufferInfo.lastScheduledAt;
+    } catch (err) {
+      logger.warn(`API: could not check Buffer queue info — ${err.message}. Assuming 0.`);
+    }
+
+    const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
+    const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
+
+    // If Buffer has existing posts in the queue, start after Buffer's latest scheduled post
+    const bufferLatestDate = (lastScheduledAt && new Date(lastScheduledAt) > new Date())
+      ? new Date(lastScheduledAt)
+      : null;
+
+    let prevTime = bufferLatestDate;
+    const cleanedPosts = [];
+
+    for (let i = 0; i < posts.length; i++) {
+      let candidateTime = new Date(posts[i].scheduledAt);
+      if (isNaN(candidateTime.getTime())) {
+        candidateTime = prevTime
+          ? new Date(prevTime.getTime() + minSpacing * 60 * 1000)
+          : new Date(Date.now() + minSpacing * 60 * 1000);
+      }
+
+      // If we have a previous post (or Buffer's latest scheduled post), enforce minimum spacing
+      if (prevTime) {
+        const minAllowedTime = new Date(prevTime.getTime() + minSpacing * 60 * 1000);
+        if (candidateTime < minAllowedTime) {
+          logger.info(`API: Post #${i + 1} scheduled time (${candidateTime.toISOString()}) collided with previous post (${prevTime.toISOString()}). Shifting to ${minAllowedTime.toISOString()}`);
+          candidateTime = minAllowedTime;
+        }
+      }
+
+      // Apply timezone-aware blackout
+      candidateTime = skipBlackout(candidateTime);
+
+      // If skipBlackout moved it to a time that collides with prevTime, advance it
+      if (prevTime && candidateTime.getTime() <= prevTime.getTime()) {
+        const offsetMs = (Math.floor(Math.random() * (maxSpacing - minSpacing + 1)) + minSpacing) * 60 * 1000;
+        candidateTime = skipBlackout(new Date(prevTime.getTime() + offsetMs));
+      }
+
+      prevTime = candidateTime;
+      cleanedPosts.push({
+        text: posts[i].text,
+        scheduledAt: candidateTime.toISOString(),
+      });
+    }
 
     // 2. Save / Append posts to local queue
     let addedItems = [];
@@ -154,17 +222,6 @@ router.post('/schedule', async (req, res) => {
       const appendResult = postQueue.appendBatch(cleanedPosts, channelId);
       addedItems = appendResult.newItems;
       logger.info(`API: appended ${cleanedPosts.length} posts to local queue (total: ${postQueue.getStats(channelId).total})`);
-    }
-
-    // 3. Check current Buffer queue to know how many slots are available
-    let currentBufferCount = 0;
-    let lastScheduledAt = null;
-    try {
-      const bufferInfo = await getBufferQueueInfo(channelId);
-      currentBufferCount = bufferInfo.count;
-      lastScheduledAt = bufferInfo.lastScheduledAt;
-    } catch (err) {
-      logger.warn(`API: could not check Buffer queue info — ${err.message}. Assuming 0.`);
     }
 
     const availableSlots = Math.max(0, postQueue.BUFFER_MAX_QUEUE - currentBufferCount);
@@ -475,6 +532,14 @@ router.get('/posts', async (req, res) => {
     logger.error(`API: /posts error — ${err.message}`, err);
     res.status(500).json({ error: err.message, posts: [] });
   }
+});
+
+// ── GET /api/history ────────────────────────────────────────────────────
+
+router.get('/history', (req, res) => {
+  const channelId = req.query.channelId || getActiveChannelId();
+  const history = postQueue.getHistory(channelId);
+  res.json({ success: true, history });
 });
 
 // ── POST /api/clear ──────────────────────────────────────────────────────

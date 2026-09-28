@@ -257,20 +257,79 @@ function markPublished(indices) {
   }
 }
 
+const HISTORY_FILE = path.join(process.cwd(), 'data', 'history.json');
+
+/**
+ * Archive published posts to data/history.json so user can view past tweets.
+ * @param {Array} posts
+ */
+function appendHistory(posts) {
+  if (!posts || posts.length === 0) return;
+  try {
+    let history = [];
+    if (fs.existsSync(HISTORY_FILE)) {
+      try {
+        history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+      } catch {
+        history = [];
+      }
+    }
+    history.push(...posts);
+    // Keep most recent 500 published posts
+    if (history.length > 500) {
+      history = history.slice(history.length - 500);
+    }
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8');
+    logger.info(`PostQueue: archived ${posts.length} published post(s) to history.json`);
+  } catch (err) {
+    logger.warn(`PostQueue: failed to archive history — ${err.message}`);
+  }
+}
+
+/**
+ * Get published post history.
+ * @param {string} [channelId]
+ * @returns {Array}
+ */
+function getHistory(channelId) {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      const history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+      if (!channelId) return history;
+      return history.filter(p => !p.channelId || p.channelId === channelId);
+    }
+  } catch (err) {
+    logger.warn(`PostQueue: failed to read history — ${err.message}`);
+  }
+  return [];
+}
+
 /**
  * Remove all posts with status "published" from the queue file.
- * This frees up disk space and keeps the queue clean.
+ * This frees up disk space and keeps the queue clean, while archiving them to history.json.
  * @param {string} [channelId]
  * @returns {number} Number of posts removed
  */
 function removePublishedPosts(channelId) {
   const queue = readQueue();
   const before = queue.posts.length;
+
+  const published = queue.posts.filter(p => {
+    if (p.status !== 'published') return false;
+    if (channelId && p.channelId && p.channelId !== channelId) return false;
+    return true;
+  });
+
+  if (published.length > 0) {
+    appendHistory(published);
+  }
+
   queue.posts = queue.posts.filter(p => {
     if (p.status !== 'published') return true;
     if (channelId && p.channelId && p.channelId !== channelId) return true;
     return false;
   });
+
   const removed = before - queue.posts.length;
   queue.totalCount = queue.posts.length;
   writeQueue(queue);
@@ -295,4 +354,5 @@ module.exports = {
   removePublishedPosts,
   getStats,
   readQueue,
+  getHistory,
 };

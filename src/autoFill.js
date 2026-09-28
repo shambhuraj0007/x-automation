@@ -1,8 +1,8 @@
 /**
  * src/autoFill.js
- * 6-hour cron that keeps Buffer queue at 10 posts by pulling from the local queue.
+ * 3-hour cron that keeps Buffer queue at 10 posts by pulling from the local queue.
  *
- * Every 6 hours:
+ * Every 3 hours:
  *   1. Clean up published posts from local queue (time-based + API-based)
  *   2. Check how many posts are currently in Buffer queue
  *   3. If < 10, pull enough pending posts from local queue to fill it
@@ -14,7 +14,7 @@
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts, getFailedPosts } = require('./buffer');
 const postQueue = require('./postQueue');
 const { schedulePostToBuffer } = require('./api');
 
@@ -24,16 +24,38 @@ let isRefilling = false;
 
 const BLACKOUT_START_HOUR = 2;  // 2:00 AM
 const BLACKOUT_END_HOUR = 6;   // 6:00 AM
+const TIMEZONE = process.env.TIMEZONE || 'Asia/Kolkata';
 
 /**
- * If a date falls within the 2 AM – 6 AM blackout window,
+ * Get hour of a date in the target timezone.
+ */
+function getHourInTimezone(date, tz = TIMEZONE) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(date);
+    const hourPart = parts.find(p => p.type === 'hour');
+    return hourPart ? parseInt(hourPart.value, 10) : date.getHours();
+  } catch {
+    return date.getHours();
+  }
+}
+
+/**
+ * If a date falls within the 2 AM – 6 AM blackout window in TIMEZONE,
  * push it forward to 6 AM same day.
  */
-function skipBlackout(date) {
-  const d = new Date(date.getTime());
-  const hour = d.getHours();
+function skipBlackout(date, tz = TIMEZONE) {
+  let d = new Date(date.getTime());
+  let hour = getHourInTimezone(d, tz);
   if (hour >= BLACKOUT_START_HOUR && hour < BLACKOUT_END_HOUR) {
-    d.setHours(BLACKOUT_END_HOUR, 0, 0, 0);
+    while (hour >= BLACKOUT_START_HOUR && hour < BLACKOUT_END_HOUR) {
+      d = new Date(d.getTime() + 30 * 60 * 1000);
+      hour = getHourInTimezone(d, tz);
+    }
+    d.setMinutes(0, 0, 0);
   }
   return d;
 }
@@ -55,9 +77,10 @@ function nextPostTime(baseTime, minSpacingMin, maxSpacingMin) {
 
 /**
  * Clean up posts that have been published to Twitter by Buffer.
- * Uses two approaches:
- *   1. Time-based: if scheduledAt is in the past, the post has been published
- *   2. API-based: cross-reference local bufferPostIds with Buffer's sent posts
+ * Buffer API is the source of truth:
+ *   1. Check Buffer sent posts (status: sent) -> mark published & archive
+ *   2. Check Buffer failed posts (status: error) -> mark error, retain in queue
+ *   3. Only fall back to time-based cleanup if post is >6 hours overdue AND API confirmed
  */
 async function cleanupPublishedPosts() {
   const channelId = getActiveChannelId();
@@ -68,48 +91,67 @@ async function cleanupPublishedPosts() {
     return;
   }
 
-  logger.info(`Cleanup: checking ${scheduled.length} scheduled post(s) for publish status...`);
+  logger.info(`Cleanup: verifying ${scheduled.length} scheduled post(s) against Buffer API...`);
 
-  const now = new Date();
   const indicesToMarkPublished = [];
+  let bufferApiSuccess = false;
 
-  // ── Approach 1: Time-based ──
-  // If a post's scheduledAt is in the past, Buffer has already published it
-  for (const post of scheduled) {
-    if (post.scheduledAt) {
-      const dueAt = new Date(post.scheduledAt);
-      if (!isNaN(dueAt.getTime()) && dueAt < now) {
-        indicesToMarkPublished.push(post.index);
-        logger.debug(`Cleanup: post #${post.index} scheduledAt ${post.scheduledAt} is in the past — marking published`);
-      }
-    }
-  }
-
-  // ── Approach 2: API-based ──
-  // Query Buffer for sent posts and match by bufferPostId
   try {
-    const sentPosts = await getSentPosts(channelId);
-    const sentIds = new Set(sentPosts.map(p => p.id));
+    const [sentPosts, failedPosts] = await Promise.all([
+      getSentPosts(channelId).catch(err => {
+        logger.warn(`Cleanup: could not fetch sent posts — ${err.message}`);
+        return null;
+      }),
+      getFailedPosts(channelId).catch(err => {
+        logger.warn(`Cleanup: could not fetch failed posts — ${err.message}`);
+        return null;
+      }),
+    ]);
+
+    const sentIds = sentPosts ? new Set(sentPosts.map(p => p.id)) : null;
+    const failedIds = failedPosts ? new Set(failedPosts.map(p => p.id)) : null;
+
+    if (sentIds !== null) {
+      bufferApiSuccess = true;
+    }
 
     for (const post of scheduled) {
-      if (post.bufferPostId && sentIds.has(post.bufferPostId)) {
-        if (!indicesToMarkPublished.includes(post.index)) {
+      // 1. Check if explicitly marked as failed on Buffer
+      if (failedIds && post.bufferPostId && failedIds.has(post.bufferPostId)) {
+        logger.error(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) failed to publish on Twitter/Buffer`);
+        postQueue.markError(post.index, 'Buffer reported: publication failed on Twitter');
+        continue;
+      }
+
+      // 2. Check if explicitly verified in Buffer's sent posts
+      if (sentIds && post.bufferPostId && sentIds.has(post.bufferPostId)) {
+        indicesToMarkPublished.push(post.index);
+        logger.info(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) verified sent on Twitter`);
+        continue;
+      }
+
+      // 3. Fallback: only if post is past scheduledAt by more than 6 hours AND API check ran
+      if (post.scheduledAt) {
+        const dueAt = new Date(post.scheduledAt);
+        const hoursOverdue = (Date.now() - dueAt.getTime()) / (1000 * 60 * 60);
+
+        if (bufferApiSuccess && hoursOverdue > 6) {
+          logger.info(`Cleanup: post #${post.index} was due ${Math.round(hoursOverdue)}h ago (${post.scheduledAt}) — marking published (overdue fallback)`);
           indicesToMarkPublished.push(post.index);
-          logger.debug(`Cleanup: post #${post.index} (buffer id: ${post.bufferPostId}) found in Buffer sent posts — marking published`);
         }
       }
     }
   } catch (err) {
-    logger.warn(`Cleanup: could not fetch sent posts from Buffer API — ${err.message}. Using time-based cleanup only.`);
+    logger.warn(`Cleanup: Buffer API check encountered an error — ${err.message}. Retaining queue for safety.`);
   }
 
-  // ── Mark and remove ──
+  // Mark verified published posts and archive to history.json
   if (indicesToMarkPublished.length > 0) {
     postQueue.markPublished(indicesToMarkPublished);
     const removed = postQueue.removePublishedPosts(channelId);
-    logger.info(`Cleanup: ✅ cleaned up ${removed} published post(s) from local queue`);
+    logger.info(`Cleanup: ✅ archived and cleaned up ${removed} verified post(s) from active queue`);
   } else {
-    logger.info('Cleanup: no published posts to clean up');
+    logger.info('Cleanup: no new published posts to clean up');
   }
 }
 
@@ -270,13 +312,13 @@ async function autoFillQueue() {
 // ── Cron ─────────────────────────────────────────────────────────────────
 
 /**
- * Start the 6-hour auto-fill cron. Runs at minute 0 every 6 hours.
+ * Start the 3-hour auto-fill cron. Runs at minute 0 every 3 hours.
  */
 function startAutoFillCron() {
-  logger.info('AutoFill: starting 6-hour cron (keeps Buffer at 10 posts)');
+  logger.info('AutoFill: starting 3-hour cron (keeps Buffer at 10 posts)');
 
-  const task = cron.schedule('0 */6 * * *', () => {
-    logger.info('AutoFill: ⏰ 6-hour cron triggered — checking queue...');
+  const task = cron.schedule('0 */3 * * *', () => {
+    logger.info('AutoFill: ⏰ 3-hour cron triggered — checking queue...');
     autoFillQueue();
   }, { scheduled: true, timezone: 'Asia/Kolkata' });
 
