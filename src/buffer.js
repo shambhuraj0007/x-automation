@@ -461,6 +461,8 @@ async function getSentPosts(targetChannelId) {
       },
     }
   );
+}
+
 /**
  * Fetch posts that failed to publish on Buffer/Twitter (status: "error").
  *
