@@ -81,27 +81,48 @@ function setupShutdownHandlers(server, cronTask) {
   });
 }
 
-// ── Start ───────────────────────────────────────────────────────────────────
-printBanner();
+const { connectDb } = require('./src/db');
+const { syncWithMongo } = require('./src/postQueue');
 
-if (process.env.DRY_RUN !== 'true') {
-  validateEnv();
-} else {
-  logger.warn('DRY RUN mode: skipping environment validation');
+// ── Start ───────────────────────────────────────────────────────────────────
+async function main() {
+  printBanner();
+
+  if (process.env.DRY_RUN !== 'true') {
+    validateEnv();
+  } else {
+    logger.warn('DRY RUN mode: skipping environment validation');
+  }
+
+  // Connect to MongoDB if URI is configured and sync queue
+  try {
+    await connectDb();
+    await syncWithMongo();
+  } catch (dbErr) {
+    logger.error(`Database startup error: ${dbErr.message}`);
+  }
+
+  // Start Express server
+  const server = app.listen(PORT, () => {
+    logger.info(`✅ Dashboard is running at http://localhost:${PORT}`);
+    logger.info(`📋 Logs are saved to: ${path.join(process.cwd(), 'logs')}`);
+  });
+
+  // Start 3-hour auto-fill cron
+  const cronTask = startAutoFillCron();
+
+  // Run an immediate auto-fill check on startup safely
+  (async () => {
+    try {
+      await autoFillQueue();
+    } catch (err) {
+      logger.warn(`Startup auto-fill check completed with note: ${err.message}`);
+    }
+  })();
+
+  setupShutdownHandlers(server, cronTask);
 }
 
-// Start Express server
-const server = app.listen(PORT, () => {
-  logger.info(`✅ Dashboard is running at http://localhost:${PORT}`);
-  logger.info(`📋 Logs are saved to: ${path.join(process.cwd(), 'logs')}`);
+main().catch(err => {
+  logger.error(`Fatal application startup error: ${err.message}`, err);
 });
-
-// Start 3-hour auto-fill cron
-const cronTask = startAutoFillCron();
-
-// Run an immediate auto-fill check on startup (in case queue drained while offline)
-autoFillQueue().catch(err => {
-  logger.warn(`Startup auto-fill check failed: ${err.message}`);
-});
-
-setupShutdownHandlers(server, cronTask);

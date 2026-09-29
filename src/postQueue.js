@@ -1,14 +1,16 @@
 /**
  * src/postQueue.js
- * Local persistent queue for posts awaiting scheduling.
+ * Persistent queue for posts awaiting scheduling.
  *
  * All pasted posts are saved here. The auto-fill cron pulls from this queue
- * to keep Buffer at 10 scheduled posts. Persists to data/post-queue.json.
+ * to keep Buffer at 10 scheduled posts.
+ * Persists to MongoDB (primary) and data/post-queue.json (local backup).
  *
  * Post states:
- *   - pending:    saved locally, not yet sent to Buffer
+ *   - pending:    saved locally / in DB, not yet sent to Buffer
  *   - scheduled:  sent to Buffer and queued for publishing
- *   - published:  published by Buffer (not tracked here)
+ *   - published:  published by Buffer (archived to history)
+ *   - error:      failed with error message preserved
  */
 
 'use strict';
@@ -16,42 +18,123 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const { getDb, hasMongo } = require('./db');
 
 const QUEUE_FILE = path.join(process.cwd(), 'data', 'post-queue.json');
+const HISTORY_FILE = path.join(process.cwd(), 'data', 'history.json');
 const BUFFER_MAX_QUEUE = 10;
 
-// Ensure data directory exists
+// Ensure data directory exists for local fallback
 const dataDir = path.dirname(QUEUE_FILE);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// ── Read / Write ─────────────────────────────────────────────────────────
+// In-memory cache to ensure synchronous reads are always instant
+let cachedQueue = null;
 
-function readQueue() {
+// ── Read / Write File Helpers ─────────────────────────────────────────────
+
+function readQueueFromFile() {
   try {
     if (fs.existsSync(QUEUE_FILE)) {
       const raw = fs.readFileSync(QUEUE_FILE, 'utf-8');
       return JSON.parse(raw);
     }
   } catch (err) {
-    logger.error(`PostQueue: failed to read queue file — ${err.message}`);
+    logger.error(`PostQueue: failed to read local queue file — ${err.message}`);
   }
-  return { posts: [], createdAt: null };
+  return { posts: [], createdAt: null, totalCount: 0 };
 }
 
-function writeQueue(queue) {
+function writeQueueToFile(queue) {
   try {
     fs.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf-8');
   } catch (err) {
-    logger.error(`PostQueue: failed to write queue file — ${err.message}`);
+    logger.error(`PostQueue: failed to write local queue file — ${err.message}`);
+  }
+}
+
+// ── MongoDB Synchronization ──────────────────────────────────────────────
+
+/**
+ * Sync queue state with MongoDB on startup.
+ * If MongoDB has data, it restores it into the active queue.
+ * If MongoDB is empty but local file has posts, it migrates them to MongoDB.
+ */
+async function syncWithMongo() {
+  if (!hasMongo()) {
+    cachedQueue = readQueueFromFile();
+    return cachedQueue;
+  }
+
+  try {
+    const db = getDb();
+    const doc = await db.collection('queue').findOne({ _id: 'post_queue' });
+
+    if (doc && Array.isArray(doc.posts) && doc.posts.length > 0) {
+      cachedQueue = {
+        posts: doc.posts,
+        createdAt: doc.createdAt || new Date().toISOString(),
+        totalCount: doc.posts.length,
+      };
+      writeQueueToFile(cachedQueue);
+      logger.info(`PostQueue: ✅ Successfully restored ${cachedQueue.posts.length} post(s) from MongoDB`);
+    } else {
+      // Local queue migration to MongoDB if local has data
+      const local = readQueueFromFile();
+      if (local && local.posts && local.posts.length > 0) {
+        await db.collection('queue').replaceOne(
+          { _id: 'post_queue' },
+          { _id: 'post_queue', ...local },
+          { upsert: true }
+        );
+        cachedQueue = local;
+        logger.info(`PostQueue: 🚀 Migrated ${local.posts.length} local posts into MongoDB`);
+      } else {
+        cachedQueue = { posts: [], createdAt: null, totalCount: 0 };
+      }
+    }
+  } catch (err) {
+    logger.warn(`PostQueue: MongoDB sync error (${err.message}) — using local queue file.`);
+    cachedQueue = readQueueFromFile();
+  }
+
+  return cachedQueue;
+}
+
+// ── Read / Write API ──────────────────────────────────────────────────────
+
+function readQueue() {
+  if (!cachedQueue) {
+    cachedQueue = readQueueFromFile();
+  }
+  return cachedQueue;
+}
+
+function writeQueue(queue) {
+  cachedQueue = queue;
+
+  // 1. Write to local file as backup cache
+  writeQueueToFile(queue);
+
+  // 2. Persist to MongoDB asynchronously
+  if (hasMongo()) {
+    const db = getDb();
+    db.collection('queue').replaceOne(
+      { _id: 'post_queue' },
+      { _id: 'post_queue', ...queue },
+      { upsert: true }
+    ).catch(err => {
+      logger.warn(`PostQueue: MongoDB async write failed — ${err.message}`);
+    });
   }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
 
 /**
- * Save a batch of posts to the local queue.
+ * Save a batch of posts to the queue.
  * Replaces any existing queue.
  *
  * @param {Array<{text: string, scheduledAt: string}>} posts
@@ -73,12 +156,12 @@ function saveBatch(posts, channelId) {
     totalCount: posts.length,
   };
   writeQueue(queue);
-  logger.info(`PostQueue: saved ${posts.length} posts to local queue`);
+  logger.info(`PostQueue: saved ${posts.length} posts to queue (MongoDB & local)`);
   return queue;
 }
 
 /**
- * Append new posts to the local queue without overwriting existing ones.
+ * Append new posts to the queue without overwriting existing ones.
  * Assigns continuous 1-based indices.
  *
  * @param {Array<{text: string, scheduledAt: string}>} newPosts
@@ -109,7 +192,7 @@ function appendBatch(newPosts, channelId) {
 }
 
 /**
- * Get the latest/highest scheduledAt time among all posts in the local queue.
+ * Get the latest/highest scheduledAt time among all posts in the queue.
  * @param {string} [channelId]
  * @returns {string|null} ISO date string, or null
  */
@@ -228,7 +311,7 @@ function getStats(channelId) {
 }
 
 /**
- * Get posts that have been scheduled to Buffer (candidates for cleanup once published).
+ * Get posts that have been scheduled to Buffer.
  * @param {string} [channelId]
  * @returns {Array}
  */
@@ -257,14 +340,14 @@ function markPublished(indices) {
   }
 }
 
-const HISTORY_FILE = path.join(process.cwd(), 'data', 'history.json');
-
 /**
- * Archive published posts to data/history.json so user can view past tweets.
+ * Archive published posts to MongoDB history collection and data/history.json.
  * @param {Array} posts
  */
 function appendHistory(posts) {
   if (!posts || posts.length === 0) return;
+
+  // 1. Local JSON file backup
   try {
     let history = [];
     if (fs.existsSync(HISTORY_FILE)) {
@@ -275,14 +358,23 @@ function appendHistory(posts) {
       }
     }
     history.push(...posts);
-    // Keep most recent 500 published posts
-    if (history.length > 500) {
-      history = history.slice(history.length - 500);
-    }
+    if (history.length > 500) history = history.slice(history.length - 500);
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8');
     logger.info(`PostQueue: archived ${posts.length} published post(s) to history.json`);
   } catch (err) {
-    logger.warn(`PostQueue: failed to archive history — ${err.message}`);
+    logger.warn(`PostQueue: failed to archive history locally — ${err.message}`);
+  }
+
+  // 2. MongoDB history collection
+  if (hasMongo()) {
+    const db = getDb();
+    const docs = posts.map(p => ({
+      ...p,
+      archivedAt: new Date().toISOString(),
+    }));
+    db.collection('history').insertMany(docs).catch(err => {
+      logger.warn(`PostQueue: MongoDB archive history failed — ${err.message}`);
+    });
   }
 }
 
@@ -305,8 +397,8 @@ function getHistory(channelId) {
 }
 
 /**
- * Remove all posts with status "published" from the queue file.
- * This frees up disk space and keeps the queue clean, while archiving them to history.json.
+ * Remove all posts with status "published" from the queue file & MongoDB.
+ * Archives them to history.
  * @param {string} [channelId]
  * @returns {number} Number of posts removed
  */
@@ -341,6 +433,7 @@ function removePublishedPosts(channelId) {
 
 module.exports = {
   BUFFER_MAX_QUEUE,
+  syncWithMongo,
   saveBatch,
   appendBatch,
   getHighestScheduledTime,
@@ -354,5 +447,6 @@ module.exports = {
   removePublishedPosts,
   getStats,
   readQueue,
+  writeQueue,
   getHistory,
 };

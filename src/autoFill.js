@@ -155,6 +155,40 @@ async function cleanupPublishedPosts() {
   }
 }
 
+/**
+ * If the server was down/offline, pending posts might have scheduledAt timestamps
+ * that are now in the past. DO NOT delete them! Reschedule them forward!
+ */
+function rescheduleExpiredPendingPosts(channelId) {
+  const queue = postQueue.readQueue();
+  const posts = queue.posts || [];
+  const now = new Date();
+  let updatedCount = 0;
+  const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
+  const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
+
+  let baseTime = new Date(now.getTime() + minSpacing * 60 * 1000);
+  baseTime = skipBlackout(baseTime);
+
+  for (const post of posts) {
+    if (channelId && post.channelId && post.channelId !== channelId) continue;
+    if (post.status === 'pending' && post.scheduledAt) {
+      const due = new Date(post.scheduledAt);
+      if (!isNaN(due.getTime()) && due < now) {
+        post.scheduledAt = baseTime.toISOString();
+        updatedCount++;
+        const offset = (Math.floor(Math.random() * (maxSpacing - minSpacing + 1)) + minSpacing) * 60 * 1000;
+        baseTime = skipBlackout(new Date(baseTime.getTime() + offset));
+      }
+    }
+  }
+
+  if (updatedCount > 0) {
+    postQueue.writeQueue(queue);
+    logger.info(`AutoFill: 🔄 Rescheduled ${updatedCount} expired pending post(s) forward so they are not lost!`);
+  }
+}
+
 // ── Auto-fill logic ─────────────────────────────────────────────────────
 
 /**
@@ -169,10 +203,16 @@ async function autoFillQueue() {
   isRefilling = true;
 
   try {
-    // Clean up posts that have already been published to Twitter
+    const channelId = getActiveChannelId();
+
+    // 0. Reschedule any pending posts that expired while server was offline!
+    rescheduleExpiredPendingPosts(channelId);
+
+    // 1. Clean up posts that have already been published to Twitter
     await cleanupPublishedPosts();
-    // 1. Check current Buffer queue count and last scheduled time
-    const bufferInfo = await getBufferQueueInfo();
+
+    // 2. Check current Buffer queue count and last scheduled time
+    const bufferInfo = await getBufferQueueInfo(channelId);
     const currentCount = bufferInfo.count;
     const lastScheduledAt = bufferInfo.lastScheduledAt;
     logger.info(`AutoFill: Buffer queue has ${currentCount} post(s). Last scheduled at: ${lastScheduledAt || 'none'}`);
@@ -182,20 +222,19 @@ async function autoFillQueue() {
       return;
     }
 
-    // 2. How many slots to fill
+    // 3. How many slots to fill
     const slotsToFill = postQueue.BUFFER_MAX_QUEUE - currentCount;
     logger.info(`AutoFill: need to fill ${slotsToFill} slot(s)`);
 
-    // 3. Get pending posts from local queue
-    const channelId = getActiveChannelId();
+    // 4. Get pending posts from queue
     const pending = postQueue.getPendingPosts(channelId);
     if (pending.length === 0) {
-      logger.info(`AutoFill: no pending posts in local queue for channel ${channelId} — nothing to schedule`);
+      logger.info(`AutoFill: no pending posts in queue for channel ${channelId} — nothing to schedule`);
       return;
     }
 
     const toSchedule = pending.slice(0, slotsToFill);
-    logger.info(`AutoFill: scheduling ${toSchedule.length} post(s) from local queue`);
+    logger.info(`AutoFill: scheduling ${toSchedule.length} post(s) from queue`);
 
     // 4. Calculate posting times
     const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
@@ -317,9 +356,13 @@ async function autoFillQueue() {
 function startAutoFillCron() {
   logger.info('AutoFill: starting 3-hour cron (keeps Buffer at 10 posts)');
 
-  const task = cron.schedule('0 */3 * * *', () => {
+  const task = cron.schedule('0 */3 * * *', async () => {
     logger.info('AutoFill: ⏰ 3-hour cron triggered — checking queue...');
-    autoFillQueue();
+    try {
+      await autoFillQueue();
+    } catch (err) {
+      logger.error(`AutoFill: ❌ Error during cron cycle — ${err.message}`, err);
+    }
   }, { scheduled: true, timezone: 'Asia/Kolkata' });
 
   return task;
