@@ -271,53 +271,67 @@ async function autoFillQueue() {
         );
         postQueue.markScheduled([post.index], [{ scheduledAt: scheduledAt.toISOString() }]);
       } else {
+        // Pacing delay of 1.2s between posts
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+
         try {
           const res = await pRetry(
             async () => {
-              const result = await axios.post(
-                BUFFER_GRAPHQL_URL,
-                {
-                  query: `
-                    mutation {
-                      createPost(input: {
-                        channelId: "${channelId}"
-                        text: ${JSON.stringify(post.text)}
-                        schedulingType: automatic
-                        mode: customScheduled
-                        dueAt: "${scheduledAt.toISOString()}"
-                      }) {
-                        ... on PostActionSuccess {
-                          post { id text status dueAt }
-                        }
-                        ... on MutationError {
-                          message
+              try {
+                const result = await axios.post(
+                  BUFFER_GRAPHQL_URL,
+                  {
+                    query: `
+                      mutation {
+                        createPost(input: {
+                          channelId: "${channelId}"
+                          text: ${JSON.stringify(post.text)}
+                          schedulingType: automatic
+                          mode: customScheduled
+                          dueAt: "${scheduledAt.toISOString()}"
+                        }) {
+                          ... on PostActionSuccess {
+                            post { id text status dueAt }
+                          }
+                          ... on MutationError {
+                            message
+                          }
                         }
                       }
-                    }
-                  `,
-                },
-                {
-                  headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
+                    `,
                   },
-                  timeout: 15000,
+                  {
+                    headers: {
+                      'Authorization': `Bearer ${token}`,
+                      'Content-Type': 'application/json',
+                    },
+                    timeout: 15000,
+                  }
+                );
+
+                if (result.data.errors) {
+                  throw new Error(result.data.errors.map(e => e.message).join('; '));
                 }
-              );
 
-              if (result.data.errors) {
-                throw new Error(result.data.errors.map(e => e.message).join('; '));
+                const createResult = result.data.data.createPost;
+                if (createResult.message) {
+                  throw new Error(`Buffer mutation error: ${createResult.message}`);
+                }
+                return createResult.post;
+              } catch (postErr) {
+                if (postErr.response && postErr.response.status === 429) {
+                  const retrySec = parseInt(postErr.response.headers['retry-after'] || '6', 10);
+                  logger.warn(`AutoFill: Buffer 429 Rate Limit hit — waiting ${retrySec}s...`);
+                  await new Promise(r => setTimeout(r, retrySec * 1000));
+                }
+                throw postErr;
               }
-
-              const createResult = result.data.data.createPost;
-              if (createResult.message) {
-                throw new Error(`Buffer mutation error: ${createResult.message}`);
-              }
-              return createResult.post;
             },
             {
               retries: 2,
-              minTimeout: 2000,
+              minTimeout: 3000,
               factor: 2,
               onFailedAttempt: (err) => {
                 logger.warn(`AutoFill: attempt ${err.attemptNumber} for post #${post.index} failed: ${err.message}`);
@@ -332,8 +346,14 @@ async function autoFillQueue() {
           }]);
 
         } catch (err) {
-          logger.error(`AutoFill: ❌ failed to schedule post #${post.index} — ${err.message}`);
-          postQueue.markError(post.index, err.message);
+          const is429 = err.response?.status === 429 || (err.message && err.message.includes('429'));
+          if (is429) {
+            logger.warn(`AutoFill: ⚠️ Buffer 429 rate limit reached. Halting refill run; remaining posts safely kept in queue.`);
+            break; // Stop trying this cycle, posts remain safe in queue for next cycle!
+          } else {
+            logger.error(`AutoFill: ❌ failed to schedule post #${post.index} — ${err.message}`);
+            postQueue.markError(post.index, err.message);
+          }
         }
       }
     }

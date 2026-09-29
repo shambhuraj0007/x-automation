@@ -68,50 +68,60 @@ async function scheduleToBuffer(channelId, text, scheduledAt) {
 
   const result = await pRetry(
     async () => {
-      const res = await axios.post(
-        BUFFER_GRAPHQL_URL,
-        {
-          query: `
-            mutation {
-              createPost(input: {
-                channelId: "${channelId}"
-                text: ${JSON.stringify(text)}
-                schedulingType: automatic
-                mode: customScheduled
-                dueAt: "${scheduledAt}"
-              }) {
-                ... on PostActionSuccess {
-                  post { id text status dueAt }
-                }
-                ... on MutationError {
-                  message
+      try {
+        const res = await axios.post(
+          BUFFER_GRAPHQL_URL,
+          {
+            query: `
+              mutation {
+                createPost(input: {
+                  channelId: "${channelId}"
+                  text: ${JSON.stringify(text)}
+                  schedulingType: automatic
+                  mode: customScheduled
+                  dueAt: "${scheduledAt}"
+                }) {
+                  ... on PostActionSuccess {
+                    post { id text status dueAt }
+                  }
+                  ... on MutationError {
+                    message
+                  }
                 }
               }
-            }
-          `,
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
+            `,
           },
-          timeout: 15000,
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 15000,
+          }
+        );
+
+        if (res.data.errors) {
+          throw new Error(res.data.errors.map(e => e.message).join('; '));
         }
-      );
 
-      if (res.data.errors) {
-        throw new Error(res.data.errors.map(e => e.message).join('; '));
+        const createResult = res.data.data.createPost;
+        if (createResult.message) {
+          throw new Error(`Buffer mutation error: ${createResult.message}`);
+        }
+        return createResult.post;
+      } catch (err) {
+        if (err.response && err.response.status === 429) {
+          const retryHeader = err.response.headers['retry-after'];
+          const waitSec = retryHeader ? Math.max(parseInt(retryHeader, 10), 6) : 6;
+          logger.warn(`API: Buffer 429 Rate Limit hit — waiting ${waitSec}s before retrying...`);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+        }
+        throw err;
       }
-
-      const createResult = res.data.data.createPost;
-      if (createResult.message) {
-        throw new Error(`Buffer mutation error: ${createResult.message}`);
-      }
-      return createResult.post;
     },
     {
       retries: 2,
-      minTimeout: 2000,
+      minTimeout: 3000,
       factor: 2,
       onFailedAttempt: (err) => {
         logger.warn(`API: Buffer schedule attempt ${err.attemptNumber} failed: ${err.message}`);
@@ -233,12 +243,24 @@ router.post('/schedule', async (req, res) => {
       `Scheduling ${toScheduleNow.length} now, ${queuedForLater} queued for auto-fill.`
     );
 
-    // 4. Schedule the first batch to Buffer
+    // 4. Schedule the first batch to Buffer with pacing and 429 protection
     const results = [];
+    let rateLimitHit = false;
 
     for (let i = 0; i < toScheduleNow.length; i++) {
       const post = toScheduleNow[i];
       const postIndex = post.index; // continuous 1-based index
+
+      if (rateLimitHit) {
+        // If Buffer rate limit was hit, leave remaining batch safely queued
+        results.push({
+          index: postIndex,
+          success: true,
+          scheduledAt: post.scheduledAt,
+          status: 'queued',
+        });
+        continue;
+      }
 
       if (dryRun) {
         logger.info(
@@ -253,6 +275,11 @@ router.post('/schedule', async (req, res) => {
           status: 'scheduled',
         });
       } else {
+        // Pacing delay of 1.2s between posts to prevent burst rate limits
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+
         try {
           const bufferPost = await scheduleToBuffer(channelId, post.text, post.scheduledAt);
           logger.info(`API: ✅ scheduled post #${postIndex} (id: ${bufferPost.id}) at ${bufferPost.dueAt}`);
@@ -270,15 +297,27 @@ router.post('/schedule', async (req, res) => {
             status: 'scheduled',
           });
         } catch (err) {
-          logger.error(`API: ❌ failed to schedule post #${postIndex} — ${err.message}`);
-          postQueue.markError(postIndex, err.message);
-          results.push({
-            index: postIndex,
-            success: false,
-            error: err.message,
-            scheduledAt: post.scheduledAt,
-            status: 'error',
-          });
+          const is429 = err.response?.status === 429 || (err.message && err.message.includes('429'));
+          if (is429) {
+            rateLimitHit = true;
+            logger.warn(`API: ⚠️ Buffer 429 rate limit reached at post #${postIndex}. Keeping post in queue safely.`);
+            results.push({
+              index: postIndex,
+              success: true,
+              scheduledAt: post.scheduledAt,
+              status: 'queued',
+            });
+          } else {
+            logger.error(`API: ❌ failed to schedule post #${postIndex} — ${err.message}`);
+            postQueue.markError(postIndex, err.message);
+            results.push({
+              index: postIndex,
+              success: false,
+              error: err.message,
+              scheduledAt: post.scheduledAt,
+              status: 'error',
+            });
+          }
         }
       }
     }
@@ -298,7 +337,7 @@ router.post('/schedule', async (req, res) => {
     const failedCount = results.filter(r => r.status === 'error').length;
 
     logger.info(
-      `API: done — ${scheduledCount} sent to Buffer, ${queuedCount} queued for later, ${failedCount} failed`
+      `API: done — ${scheduledCount} sent to Buffer, ${queuedCount} queued for later, ${failedCount} failed${rateLimitHit ? ' (rate-limited by Buffer)' : ''}`
     );
 
     res.json({
@@ -307,6 +346,7 @@ router.post('/schedule', async (req, res) => {
       scheduledNow: scheduledCount,
       queuedForLater: queuedCount,
       failed: failedCount,
+      rateLimited: rateLimitHit,
       bufferLimit: postQueue.BUFFER_MAX_QUEUE,
     });
 

@@ -842,7 +842,9 @@ async function scheduleAll() {
     const queued = result.queuedForLater || 0;
     const failed = result.failed || 0;
 
-    if (failed === 0 && queued === 0) {
+    if (result.rateLimited) {
+      showToast(`⏳ Buffer rate limit reached (${scheduled} sent). Remaining ${queued} posts safely saved in database & will auto-schedule!`, 'info');
+    } else if (failed === 0 && queued === 0) {
       showToast(`🚀 All ${scheduled} posts sent to Buffer!`, 'success');
     } else if (failed === 0) {
       showToast(`✅ ${scheduled} sent to Buffer now, ${queued} queued for auto-fill (every 3h)`, 'success');
