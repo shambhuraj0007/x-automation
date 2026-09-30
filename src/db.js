@@ -37,8 +37,13 @@ async function connectDb() {
 
     // Create indexes for efficient querying
     try {
-      await db.collection('queue').createIndex({ channelId: 1 });
+      const postsCol = db.collection('posts');
+      await postsCol.createIndex({ _postId: 1 }, { unique: true });
+      await postsCol.createIndex({ status: 1 });
+      await postsCol.createIndex({ channelId: 1, status: 1 });
+      await postsCol.createIndex({ scheduledAt: 1 });
       await db.collection('history').createIndex({ channelId: 1, publishedAt: -1 });
+      logger.debug('MongoDB: indexes created/verified on posts and history collections');
     } catch (idxErr) {
       logger.debug(`MongoDB index notice: ${idxErr.message}`);
     }

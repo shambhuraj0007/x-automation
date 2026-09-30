@@ -41,7 +41,7 @@ function printBanner() {
   logger.info(`  Spacing    : ${process.env.MIN_SPACING_MINUTES || 60}–${process.env.MAX_SPACING_MINUTES || 90} min`);
   logger.info(`  Buffer max : 10 posts`);
   logger.info(`  Blackout   : 2:00 AM – 6:00 AM (no posting)`);
-  logger.info(`  Auto-fill  : every 3 hours`);
+  logger.info(`  Auto-fill  : every 6 hours (configurable via AUTOFILL_CRON)`);
   logger.info(`  Mode       : ${dryRun ? '🟡 DRY RUN (no real Buffer calls)' : '🟢 LIVE'}`);
   logger.info('═══════════════════════════════════════════════════');
 }

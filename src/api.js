@@ -3,21 +3,22 @@
  * Express API routes for the Post Scheduler dashboard.
  *
  * Buffer has a 10-post queue limit. This API:
- *   1. Saves ALL posts to the local queue (data/post-queue.json)
- *   2. Immediately schedules up to 10 to Buffer
- *   3. The 4-hour cron in autoFill.js handles the rest
+ *   1. Saves ALL posts to MongoDB (each post = own document)
+ *   2. Checks Buffer for empty slots + gets latest scheduled time
+ *   3. Schedules posts to Buffer starting after the latest post
+ *   4. The 3-hour cron in autoFill.js handles remaining pending posts
  *
  * Endpoints:
- *   POST /api/schedule   — Save posts and schedule first batch to Buffer
+ *   POST /api/schedule   — Save posts to MongoDB and schedule first batch to Buffer
  *   GET  /api/queue      — Get Buffer queue count + local queue stats
- *   GET  /api/posts      — Get all local posts with their statuses
+ *   GET  /api/posts      — Get all posts with their statuses
  */
 
 'use strict';
 
 const express = require('express');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, setActiveChannelId } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, setActiveChannelId, clearBufferCache } = require('./buffer');
 const postQueue = require('./postQueue');
 
 const router = express.Router();
@@ -120,9 +121,9 @@ async function scheduleToBuffer(channelId, text, scheduledAt) {
       }
     },
     {
-      retries: 2,
-      minTimeout: 3000,
-      factor: 2,
+      retries: 1,
+      minTimeout: 1000,
+      factor: 1.5,
       onFailedAttempt: (err) => {
         logger.warn(`API: Buffer schedule attempt ${err.attemptNumber} failed: ${err.message}`);
       },
@@ -135,19 +136,18 @@ async function scheduleToBuffer(channelId, text, scheduledAt) {
 // ── POST /api/schedule ───────────────────────────────────────────────────
 
 /**
- * Save all posts to local queue + schedule first batch (up to 10) to Buffer.
+ * Flow:
+ *   1. Check Buffer queue → get empty slots + latest scheduled post time
+ *   2. Calculate posting times starting AFTER Buffer's latest post
+ *   3. Save ALL posts to MongoDB (each post = own document)
+ *   4. Push posts to Buffer (up to available slots)
+ *   5. Remaining posts stay as 'pending' in MongoDB for 3h auto-fill cron
  *
  * Request body:
  * {
- *   posts: [{ text: string, scheduledAt: string (ISO) }]
- * }
- *
- * Response:
- * {
- *   saved: number,
- *   scheduledNow: number,
- *   queuedForLater: number,
- *   results: [{ index, success, scheduledAt, error? }]
+ *   posts: [{ text: string, scheduledAt: string (ISO) }],
+ *   channelId?: string,
+ *   mode?: 'append' | 'replace'
  * }
  */
 router.post('/schedule', async (req, res) => {
@@ -164,16 +164,16 @@ router.post('/schedule', async (req, res) => {
     }
 
     const dryRun = process.env.DRY_RUN === 'true';
+    const mode = req.body.mode || 'append';
 
-    const mode = req.body.mode || 'append'; // 'append' by default so we never lose existing queue
-
-    // 1. Check current Buffer queue to know how many slots are available and latest scheduled post
+    // ── STEP 1: Check Buffer queue for empty slots + latest scheduled time ──
     let currentBufferCount = 0;
     let lastScheduledAt = null;
     try {
       const bufferInfo = await getBufferQueueInfo(channelId);
       currentBufferCount = bufferInfo.count;
       lastScheduledAt = bufferInfo.lastScheduledAt;
+      logger.info(`API: 📊 Buffer queue: ${currentBufferCount}/10 posts. Latest scheduled: ${lastScheduledAt || 'none'}`);
     } catch (err) {
       logger.warn(`API: could not check Buffer queue info — ${err.message}. Assuming 0.`);
     }
@@ -181,12 +181,29 @@ router.post('/schedule', async (req, res) => {
     const minSpacing = parseInt(process.env.MIN_SPACING_MINUTES || '60', 10);
     const maxSpacing = parseInt(process.env.MAX_SPACING_MINUTES || '90', 10);
 
-    // If Buffer has existing posts in the queue, start after Buffer's latest scheduled post
+    // ── STEP 2: Calculate posting times starting AFTER Buffer's latest post ──
+    // If Buffer has existing posts, ALL new posts schedule AFTER the last one
     const bufferLatestDate = (lastScheduledAt && new Date(lastScheduledAt) > new Date())
       ? new Date(lastScheduledAt)
       : null;
 
+    if (bufferLatestDate) {
+      logger.info(`API: 📅 Buffer's latest post is at ${bufferLatestDate.toISOString()} — new posts will schedule after this`);
+    }
+
+    // Also check local queue for any pending posts with future scheduled times
+    const localHighest = postQueue.getHighestScheduledTime(channelId);
     let prevTime = bufferLatestDate;
+
+    // Use whichever is later: Buffer's latest OR local queue's latest
+    if (localHighest) {
+      const localDate = new Date(localHighest);
+      if (!prevTime || localDate > prevTime) {
+        prevTime = localDate;
+        logger.info(`API: 📅 Local queue has posts scheduled up to ${localDate.toISOString()} — starting after this`);
+      }
+    }
+
     const cleanedPosts = [];
 
     for (let i = 0; i < posts.length; i++) {
@@ -197,16 +214,15 @@ router.post('/schedule', async (req, res) => {
           : new Date(Date.now() + minSpacing * 60 * 1000);
       }
 
-      // If we have a previous post (or Buffer's latest scheduled post), enforce minimum spacing
+      // Enforce minimum spacing after previous post (or Buffer's latest)
       if (prevTime) {
         const minAllowedTime = new Date(prevTime.getTime() + minSpacing * 60 * 1000);
         if (candidateTime < minAllowedTime) {
-          logger.info(`API: Post #${i + 1} scheduled time (${candidateTime.toISOString()}) collided with previous post (${prevTime.toISOString()}). Shifting to ${minAllowedTime.toISOString()}`);
           candidateTime = minAllowedTime;
         }
       }
 
-      // Apply timezone-aware blackout
+      // Apply timezone-aware blackout (skip 2-6 AM)
       candidateTime = skipBlackout(candidateTime);
 
       // If skipBlackout moved it to a time that collides with prevTime, advance it
@@ -222,37 +238,35 @@ router.post('/schedule', async (req, res) => {
       });
     }
 
-    // 2. Save / Append posts to local queue
+    // ── STEP 3: Save ALL posts to MongoDB (each post = own document) ──
     let addedItems = [];
     if (mode === 'replace') {
       postQueue.saveBatch(cleanedPosts, channelId);
       addedItems = postQueue.getAllPosts(channelId);
-      logger.info(`API: replaced local queue with ${cleanedPosts.length} posts for channel ${channelId}`);
+      logger.info(`API: 💾 Saved ${cleanedPosts.length} posts to MongoDB (replaced queue) for channel ${channelId}`);
     } else {
       const appendResult = postQueue.appendBatch(cleanedPosts, channelId);
       addedItems = appendResult.newItems;
-      logger.info(`API: appended ${cleanedPosts.length} posts to local queue (total: ${postQueue.getStats(channelId).total})`);
+      logger.info(`API: 💾 Saved ${cleanedPosts.length} posts to MongoDB (appended). Total in queue: ${postQueue.getStats(channelId).total}`);
     }
 
+    // ── STEP 4: Push posts to Buffer (up to available slots) ──
     const availableSlots = Math.max(0, postQueue.BUFFER_MAX_QUEUE - currentBufferCount);
     const toScheduleNow = addedItems.slice(0, availableSlots);
     const queuedForLater = addedItems.length - toScheduleNow.length;
 
     logger.info(
-      `API: Buffer has ${currentBufferCount}/10 posts (last at ${lastScheduledAt || 'none'}). ` +
-      `Scheduling ${toScheduleNow.length} now, ${queuedForLater} queued for auto-fill.`
+      `API: 🚀 ${availableSlots} Buffer slots free. Scheduling ${toScheduleNow.length} now, ${queuedForLater} saved in MongoDB for auto-fill.`
     );
 
-    // 4. Schedule the first batch to Buffer with pacing and 429 protection
     const results = [];
     let rateLimitHit = false;
 
     for (let i = 0; i < toScheduleNow.length; i++) {
       const post = toScheduleNow[i];
-      const postIndex = post.index; // continuous 1-based index
+      const postIndex = post.index;
 
       if (rateLimitHit) {
-        // If Buffer rate limit was hit, leave remaining batch safely queued
         results.push({
           index: postIndex,
           success: true,
@@ -275,15 +289,16 @@ router.post('/schedule', async (req, res) => {
           status: 'scheduled',
         });
       } else {
-        // Pacing delay of 1.2s between posts to prevent burst rate limits
+        // 250ms spacing between Buffer API calls
         if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1200));
+          await new Promise(resolve => setTimeout(resolve, 250));
         }
 
         try {
           const bufferPost = await scheduleToBuffer(channelId, post.text, post.scheduledAt);
-          logger.info(`API: ✅ scheduled post #${postIndex} (id: ${bufferPost.id}) at ${bufferPost.dueAt}`);
+          logger.info(`API: ✅ Post #${postIndex} → Buffer (id: ${bufferPost.id}) at ${bufferPost.dueAt}`);
 
+          // Update post in MongoDB with Buffer post ID
           postQueue.markScheduled([postIndex], [{
             bufferPostId: bufferPost.id,
             scheduledAt: bufferPost.dueAt,
@@ -300,7 +315,7 @@ router.post('/schedule', async (req, res) => {
           const is429 = err.response?.status === 429 || (err.message && err.message.includes('429'));
           if (is429) {
             rateLimitHit = true;
-            logger.warn(`API: ⚠️ Buffer 429 rate limit reached at post #${postIndex}. Keeping post in queue safely.`);
+            logger.warn(`API: ⚠️ Buffer 429 rate limit at post #${postIndex}. Post stays safe in MongoDB.`);
             results.push({
               index: postIndex,
               success: true,
@@ -308,7 +323,7 @@ router.post('/schedule', async (req, res) => {
               status: 'queued',
             });
           } else {
-            logger.error(`API: ❌ failed to schedule post #${postIndex} — ${err.message}`);
+            logger.error(`API: ❌ Failed to schedule post #${postIndex} — ${err.message}`);
             postQueue.markError(postIndex, err.message);
             results.push({
               index: postIndex,
@@ -322,13 +337,13 @@ router.post('/schedule', async (req, res) => {
       }
     }
 
-    // 5. Build response for remaining queued posts
+    // ── STEP 5: Report remaining posts (safely in MongoDB for auto-fill) ──
     for (let i = toScheduleNow.length; i < addedItems.length; i++) {
       results.push({
         index: addedItems[i].index,
         success: true,
         scheduledAt: addedItems[i].scheduledAt,
-        status: 'queued',  // waiting for auto-fill cron
+        status: 'queued',  // safe in MongoDB, auto-fill cron will schedule later
       });
     }
 
@@ -336,8 +351,10 @@ router.post('/schedule', async (req, res) => {
     const queuedCount = results.filter(r => r.status === 'queued').length;
     const failedCount = results.filter(r => r.status === 'error').length;
 
+    clearBufferCache();
     logger.info(
-      `API: done — ${scheduledCount} sent to Buffer, ${queuedCount} queued for later, ${failedCount} failed${rateLimitHit ? ' (rate-limited by Buffer)' : ''}`
+      `API: ✅ Done — ${scheduledCount} → Buffer, ${queuedCount} → MongoDB (pending), ${failedCount} failed` +
+      (rateLimitHit ? ' [rate-limited]' : '')
     );
 
     res.json({

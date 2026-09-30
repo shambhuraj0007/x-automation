@@ -22,6 +22,20 @@ const { generateImage } = require('./imageGen');
 const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
 const CONFIG_FILE = path.join(process.cwd(), 'data', 'config.json');
 
+// ── In-Memory Cache for Buffer API Calls ─────────────────────────────────────
+const queueCache = new Map();
+const QUEUE_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+
+let channelsCache = null;
+let channelsCacheExpiresAt = 0;
+const CHANNELS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function clearBufferCache() {
+  queueCache.clear();
+  channelsCache = null;
+  channelsCacheExpiresAt = 0;
+}
+
 // ── Active Channel Management ──────────────────────────────────────────────
 
 function getActiveChannelId() {
@@ -39,6 +53,7 @@ function getActiveChannelId() {
 }
 
 function setActiveChannelId(channelId) {
+  clearBufferCache();
   try {
     const dir = path.dirname(CONFIG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -60,7 +75,7 @@ function setActiveChannelId(channelId) {
 
 async function gql(query, variables = {}) {
   const token = process.env.BUFFER_ACCESS_TOKEN;
-  if (!token) throw new Error('BUFFER_ACCESS_TOKEN is not set in .env');
+  if (!token) throw new pRetry.AbortError(new Error('BUFFER_ACCESS_TOKEN is not set in .env'));
 
   const res = await axios.post(
     BUFFER_GRAPHQL_URL,
@@ -76,6 +91,11 @@ async function gql(query, variables = {}) {
 
   if (res.data.errors) {
     const msg = res.data.errors.map(e => e.message).join('; ');
+    // Do not retry permanent client/permission errors
+    const isPermanent = /actor can not access|unauthorized|forbidden|not found|invalid token/i.test(msg);
+    if (isPermanent) {
+      throw new pRetry.AbortError(new Error(`Buffer GraphQL error: ${msg}`));
+    }
     throw new Error(`Buffer GraphQL error: ${msg}`);
   }
 
@@ -178,9 +198,15 @@ function nextScheduledTime(base) {
  * Fetch all available channels for the configured organization.
  * @returns {Promise<Array<{id: string, name: string, displayName: string, service: string, avatar: string}>>}
  */
-async function getChannels() {
+async function getChannels(forceRefresh = false) {
   const orgId = process.env.BUFFER_ORG_ID;
-  if (!orgId) throw new Error('BUFFER_ORG_ID is not set in .env');
+  if (!orgId) throw new pRetry.AbortError(new Error('BUFFER_ORG_ID is not set in .env'));
+
+  const now = Date.now();
+  if (!forceRefresh && channelsCache && now < channelsCacheExpiresAt) {
+    logger.debug('Buffer: using cached channels list');
+    return channelsCache;
+  }
 
   return pRetry(
     async () => {
@@ -196,9 +222,11 @@ async function getChannels() {
           }
         }
       `);
-      return data.channels || [];
+      channelsCache = data.channels || [];
+      channelsCacheExpiresAt = Date.now() + CHANNELS_CACHE_TTL;
+      return channelsCache;
     },
-    { retries: 2, minTimeout: 1500 }
+    { retries: 1, minTimeout: 1500 }
   );
 }
 
@@ -209,17 +237,27 @@ async function getChannels() {
  * - posts: array of { id, dueAt, text, status }
  *
  * @param {string} [targetChannelId] - Optional specific channel ID to query
+ * @param {boolean} [forceRefresh=false] - Bypass cache if true
  * @returns {Promise<{count: number, lastScheduledAt: string|null, posts: Array}>}
  */
-async function getBufferQueueInfo(targetChannelId) {
+async function getBufferQueueInfo(targetChannelId, forceRefresh = false) {
   const orgId = process.env.BUFFER_ORG_ID;
   const channelId = targetChannelId || getActiveChannelId();
 
   if (!orgId || !channelId) {
-    throw new Error(
+    throw new pRetry.AbortError(new Error(
       'BUFFER_ORG_ID and BUFFER_CHANNEL_ID must be set in .env. ' +
       'Run: node src/setup.js to discover them automatically.'
-    );
+    ));
+  }
+
+  const now = Date.now();
+  if (!forceRefresh && queueCache.has(channelId)) {
+    const cached = queueCache.get(channelId);
+    if (now < cached.expiresAt) {
+      logger.debug(`Buffer: using cached queue info for channel ${channelId}`);
+      return cached.data;
+    }
   }
 
   return pRetry(
@@ -259,14 +297,21 @@ async function getBufferQueueInfo(targetChannelId) {
 
       logger.debug(`Buffer: ${count} scheduled post(s). Last scheduled at: ${lastPost?.dueAt || 'none'}`);
 
-      return {
+      const result = {
         count,
         lastScheduledAt: lastPost ? lastPost.dueAt : null,
         posts: scheduledPosts,
       };
+
+      queueCache.set(channelId, {
+        data: result,
+        expiresAt: Date.now() + QUEUE_CACHE_TTL,
+      });
+
+      return result;
     },
     {
-      retries: 3,
+      retries: 1,
       minTimeout: 2000,
       factor: 2,
       onFailedAttempt: (err) => {
@@ -386,6 +431,7 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
       }
 
       const post = result.post;
+      clearBufferCache();
       logger.info(
         `Buffer: scheduled post ${index}/${total} (id: ${post.id}) ` +
         `at ${post.dueAt} — ` +
@@ -394,7 +440,7 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
       );
     },
     {
-      retries: 3,
+      retries: 1,
       minTimeout: 3000,
       factor: 2,
       onFailedAttempt: (err) => {
@@ -416,9 +462,9 @@ async function getSentPosts(targetChannelId) {
   const channelId = targetChannelId || getActiveChannelId();
 
   if (!orgId || !channelId) {
-    throw new Error(
+    throw new pRetry.AbortError(new Error(
       'BUFFER_ORG_ID and BUFFER_CHANNEL_ID must be set in .env.'
-    );
+    ));
   }
 
   return pRetry(
@@ -454,7 +500,7 @@ async function getSentPosts(targetChannelId) {
       return sentPosts;
     },
     {
-      retries: 2,
+      retries: 1,
       minTimeout: 2000,
       onFailedAttempt: (err) => {
         logger.warn(`Buffer getSentPosts attempt ${err.attemptNumber} failed: ${err.message}`);
@@ -518,4 +564,5 @@ module.exports = {
   setActiveChannelId,
   getSentPosts,
   getFailedPosts,
+  clearBufferCache,
 };

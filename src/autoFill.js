@@ -14,7 +14,7 @@
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts, getFailedPosts } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts, getFailedPosts, clearBufferCache } = require('./buffer');
 const postQueue = require('./postQueue');
 const { schedulePostToBuffer } = require('./api');
 
@@ -88,6 +88,14 @@ async function cleanupPublishedPosts() {
 
   if (scheduled.length === 0) {
     logger.debug('Cleanup: no scheduled posts in local queue — nothing to clean');
+    return;
+  }
+
+  // Optimize API calls: Only query Buffer if at least one post has reached or passed its scheduled time
+  const now = Date.now();
+  const hasPastDuePosts = scheduled.some(p => p.scheduledAt && new Date(p.scheduledAt).getTime() <= now);
+  if (!hasPastDuePosts) {
+    logger.debug('Cleanup: no scheduled posts have reached their due time yet — skipping Buffer sent/failed checks');
     return;
   }
 
@@ -271,9 +279,9 @@ async function autoFillQueue() {
         );
         postQueue.markScheduled([post.index], [{ scheduledAt: scheduledAt.toISOString() }]);
       } else {
-        // Pacing delay of 1.2s between posts
+        // Quick 250ms spacing between posts
         if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1200));
+          await new Promise(resolve => setTimeout(resolve, 250));
         }
 
         try {
@@ -330,9 +338,9 @@ async function autoFillQueue() {
               }
             },
             {
-              retries: 2,
-              minTimeout: 3000,
-              factor: 2,
+              retries: 1,
+              minTimeout: 1000,
+              factor: 1.5,
               onFailedAttempt: (err) => {
                 logger.warn(`AutoFill: attempt ${err.attemptNumber} for post #${post.index} failed: ${err.message}`);
               },
@@ -359,6 +367,9 @@ async function autoFillQueue() {
     }
 
     const stats = postQueue.getStats();
+    if (toSchedule.length > 0) {
+      clearBufferCache();
+    }
     logger.info(`AutoFill: done — ${stats.scheduled} scheduled, ${stats.pending} pending, ${stats.errored} errored`);
 
   } catch (err) {
@@ -371,13 +382,14 @@ async function autoFillQueue() {
 // ── Cron ─────────────────────────────────────────────────────────────────
 
 /**
- * Start the 3-hour auto-fill cron. Runs at minute 0 every 3 hours.
+ * Start the auto-fill cron. Default runs every 6 hours (keeps Buffer at 10 posts).
  */
 function startAutoFillCron() {
-  logger.info('AutoFill: starting 3-hour cron (keeps Buffer at 10 posts)');
+  const cronExpr = process.env.AUTOFILL_CRON || '0 */6 * * *';
+  logger.info(`AutoFill: starting cron with schedule "${cronExpr}" (keeps Buffer at 10 posts)`);
 
-  const task = cron.schedule('0 */3 * * *', async () => {
-    logger.info('AutoFill: ⏰ 3-hour cron triggered — checking queue...');
+  const task = cron.schedule(cronExpr, async () => {
+    logger.info('AutoFill: ⏰ Scheduled cron triggered — checking queue...');
     try {
       await autoFillQueue();
     } catch (err) {
