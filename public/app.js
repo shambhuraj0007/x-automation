@@ -850,7 +850,9 @@ async function scheduleAll() {
   // Build posts with their pre-calculated times
   const postsToSchedule = pendingPosts.map(p => ({
     text: p.text,
-    scheduledAt: p.scheduledAt.toISOString(),
+    scheduledAt: (p.scheduledAt instanceof Date && !isNaN(p.scheduledAt.getTime()))
+      ? p.scheduledAt.toISOString()
+      : (p.scheduledAt ? new Date(p.scheduledAt).toISOString() : new Date().toISOString()),
   }));
 
   // Mark all pending as scheduling

@@ -172,7 +172,7 @@ router.post('/schedule', async (req, res) => {
     let currentBufferCount = 0;
     let lastScheduledAt = null;
     try {
-      const bufferInfo = await getBufferQueueInfo(channelId);
+      const bufferInfo = await getBufferQueueInfo(channelId, true);
       currentBufferCount = bufferInfo.count;
       lastScheduledAt = bufferInfo.lastScheduledAt;
       logger.info(`API: 📊 Buffer queue: ${currentBufferCount}/10 posts. Latest scheduled: ${lastScheduledAt || 'none'}`);
@@ -243,11 +243,11 @@ router.post('/schedule', async (req, res) => {
     // ── STEP 3: Save ALL posts to MongoDB (each post = own document) ──
     let addedItems = [];
     if (mode === 'replace') {
-      postQueue.saveBatch(cleanedPosts, channelId);
+      await postQueue.saveBatch(cleanedPosts, channelId);
       addedItems = postQueue.getAllPosts(channelId);
       logger.info(`API: 💾 Saved ${cleanedPosts.length} posts to MongoDB (replaced queue) for channel ${channelId}`);
     } else {
-      const appendResult = postQueue.appendBatch(cleanedPosts, channelId);
+      const appendResult = await postQueue.appendBatch(cleanedPosts, channelId);
       addedItems = appendResult.newItems;
       logger.info(`API: 💾 Saved ${cleanedPosts.length} posts to MongoDB (appended). Total in queue: ${postQueue.getStats(channelId).total}`);
     }
@@ -283,7 +283,8 @@ router.post('/schedule', async (req, res) => {
           `[DRY RUN] Would schedule post #${postIndex} at ${post.scheduledAt}:\n` +
           `"${post.text.slice(0, 120)}${post.text.length > 120 ? '...' : ''}"`
         );
-        postQueue.markScheduled([postIndex], [{ scheduledAt: post.scheduledAt }]);
+        // Delete post from everywhere as soon as scheduled in Buffer
+        await postQueue.deletePost(post._postId);
         results.push({
           index: postIndex,
           success: true,
@@ -300,11 +301,8 @@ router.post('/schedule', async (req, res) => {
           const bufferPost = await scheduleToBuffer(channelId, post.text, post.scheduledAt);
           logger.info(`API: ✅ Post #${postIndex} → Buffer (id: ${bufferPost.id}) at ${bufferPost.dueAt}`);
 
-          // Update post in MongoDB with Buffer post ID
-          postQueue.markScheduled([postIndex], [{
-            bufferPostId: bufferPost.id,
-            scheduledAt: bufferPost.dueAt,
-          }]);
+          // Delete post from everywhere as soon as scheduled in Buffer
+          await postQueue.deletePost(post._postId);
 
           results.push({
             index: postIndex,
@@ -326,7 +324,7 @@ router.post('/schedule', async (req, res) => {
             });
           } else if (isDuplicatePostError(err.message)) {
             logger.warn(`API: 🗑️ Post #${postIndex} rejected as duplicate by Buffer — deleting from queue and MongoDB`);
-            await postQueue.deletePostByIndex(postIndex);
+            await postQueue.deletePost(post._postId);
             results.push({
               index: postIndex,
               success: false,

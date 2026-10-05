@@ -160,7 +160,7 @@ async function removeFromMongo(postId) {
  */
 async function syncWithMongo() {
   if (!hasMongo()) {
-    cachedPosts = readQueueFromFile();
+    cachedPosts = readQueueFromFile().filter(p => p.status !== 'scheduled' && p.status !== 'published');
     logger.info(`PostQueue: loaded ${cachedPosts.length} post(s) from local file (no MongoDB)`);
     return cachedPosts;
   }
@@ -169,9 +169,19 @@ async function syncWithMongo() {
     const db = getDb();
     const col = db.collection(POSTS_COLLECTION);
 
-    // Fetch all non-published posts from MongoDB
+    // Purge any lingering 'scheduled' or 'published' posts from MongoDB so they are not retained anywhere
+    try {
+      const staleRes = await col.deleteMany({ status: { $in: ['scheduled', 'published'] } });
+      if (staleRes.deletedCount > 0) {
+        logger.info(`PostQueue: 🗑️ Purged ${staleRes.deletedCount} previously scheduled/published post(s) from MongoDB`);
+      }
+    } catch (cleanErr) {
+      logger.debug(`PostQueue: stale cleanup notice — ${cleanErr.message}`);
+    }
+
+    // Fetch all non-published, non-scheduled posts from MongoDB
     const mongoPosts = await col.find({
-      status: { $in: ['pending', 'scheduled', 'error'] },
+      status: { $in: ['pending', 'error'] },
     }).sort({ index: 1 }).toArray();
 
     if (mongoPosts.length > 0) {
@@ -187,7 +197,7 @@ async function syncWithMongo() {
       logger.info(`PostQueue: ✅ Restored ${cachedPosts.length} post(s) from MongoDB`);
     } else {
       // MongoDB is empty — check local file for migration
-      const localPosts = readQueueFromFile();
+      const localPosts = readQueueFromFile().filter(p => p.status !== 'scheduled' && p.status !== 'published');
       if (localPosts.length > 0) {
         // Ensure each post has a _postId
         localPosts.forEach((p, i) => {
@@ -217,7 +227,7 @@ async function syncWithMongo() {
     const oldDoc = await db.collection('queue').findOne({ _id: 'post_queue' });
     if (oldDoc && Array.isArray(oldDoc.posts) && oldDoc.posts.length > 0) {
       logger.info(`PostQueue: Found ${oldDoc.posts.length} posts in old 'queue' collection — migrating...`);
-      const oldPosts = oldDoc.posts.filter(p => p.status !== 'published');
+      const oldPosts = oldDoc.posts.filter(p => p.status !== 'published' && p.status !== 'scheduled');
       for (const p of oldPosts) {
         if (!p._postId) p._postId = `migrated_${Date.now()}_${p.index}`;
         // Only migrate if not already present
@@ -235,7 +245,7 @@ async function syncWithMongo() {
 
   } catch (err) {
     logger.warn(`PostQueue: MongoDB sync error (${err.message}) — using local queue file`);
-    cachedPosts = readQueueFromFile();
+    cachedPosts = readQueueFromFile().filter(p => p.status !== 'scheduled' && p.status !== 'published');
   }
 
   return cachedPosts;
@@ -280,7 +290,7 @@ function generatePostId() {
  * @param {Array<{text: string, scheduledAt: string}>} posts
  * @param {string} [channelId]
  */
-function saveBatch(posts, channelId) {
+async function saveBatch(posts, channelId) {
   const targetChannel = channelId || getDefaultChannelId();
   const now = new Date().toISOString();
   cachedPosts = posts.map((p, i) => ({
@@ -300,25 +310,21 @@ function saveBatch(posts, channelId) {
 
   // Persist to MongoDB: clear old posts, insert new
   if (hasMongo()) {
-    const db = getDb();
-    (async () => {
-      try {
-        const col = db.collection(POSTS_COLLECTION);
-        // Remove old posts for this channel
-        if (channelId) {
-          await col.deleteMany({ channelId, status: { $in: ['pending', 'error'] } });
-        } else {
-          await col.deleteMany({ status: { $in: ['pending', 'error'] } });
-        }
-        // Insert new individual documents
-        if (cachedPosts.length > 0) {
-          await col.insertMany(cachedPosts.map(p => ({ ...p })));
-        }
-        logger.info(`PostQueue: saved ${cachedPosts.length} posts to MongoDB (individual docs)`);
-      } catch (err) {
-        logger.warn(`PostQueue: MongoDB saveBatch error — ${err.message}`);
+    try {
+      const db = getDb();
+      const col = db.collection(POSTS_COLLECTION);
+      if (channelId) {
+        await col.deleteMany({ channelId, status: { $in: ['pending', 'error'] } });
+      } else {
+        await col.deleteMany({ status: { $in: ['pending', 'error'] } });
       }
-    })();
+      if (cachedPosts.length > 0) {
+        await col.insertMany(cachedPosts.map(p => ({ ...p })));
+      }
+      logger.info(`PostQueue: saved ${cachedPosts.length} posts to MongoDB (individual docs)`);
+    } catch (err) {
+      logger.warn(`PostQueue: MongoDB saveBatch error — ${err.message}`);
+    }
   }
 
   logger.info(`PostQueue: saved ${posts.length} posts to queue`);
@@ -332,7 +338,7 @@ function saveBatch(posts, channelId) {
  * @param {Array<{text: string, scheduledAt: string}>} newPosts
  * @param {string} [channelId]
  */
-function appendBatch(newPosts, channelId) {
+async function appendBatch(newPosts, channelId) {
   const targetChannel = channelId || getDefaultChannelId();
   const now = new Date().toISOString();
   const startIndex = cachedPosts.length;
@@ -355,14 +361,13 @@ function appendBatch(newPosts, channelId) {
 
   // Insert new docs into MongoDB
   if (hasMongo()) {
-    const db = getDb();
-    db.collection(POSTS_COLLECTION).insertMany(mapped.map(p => ({ ...p })))
-      .then(() => {
-        logger.info(`PostQueue: inserted ${mapped.length} new post docs into MongoDB`);
-      })
-      .catch(err => {
-        logger.warn(`PostQueue: MongoDB appendBatch error — ${err.message}`);
-      });
+    try {
+      const db = getDb();
+      await db.collection(POSTS_COLLECTION).insertMany(mapped.map(p => ({ ...p })));
+      logger.info(`PostQueue: inserted ${mapped.length} new post docs into MongoDB`);
+    } catch (err) {
+      logger.warn(`PostQueue: MongoDB appendBatch error — ${err.message}`);
+    }
   }
 
   logger.info(`PostQueue: appended ${newPosts.length} posts (total: ${cachedPosts.length})`);
@@ -447,26 +452,25 @@ function getAllPosts(channelId) {
 }
 
 /**
- * Mark specific posts as scheduled (after successfully sending to Buffer).
- * Updates each post's own MongoDB document.
+ * As soon as posts are scheduled in Buffer, delete them from everywhere:
+ * in-memory cache, local JSON queue file, and MongoDB.
  *
- * @param {number[]} indices  - The 1-based post indices to mark
- * @param {Object[]} results  - Array of { bufferPostId, scheduledAt } per post
+ * @param {number[]} indices  - The 1-based post indices to delete
+ * @param {Object[]} [results] - Optional results metadata
  */
-function markScheduled(indices, results) {
-  indices.forEach((idx, i) => {
+async function markScheduled(indices, results) {
+  const idsToDelete = [];
+  indices.forEach(idx => {
     const post = cachedPosts.find(p => p.index === idx);
-    if (post) {
-      post.status = 'scheduled';
-      post.bufferPostId = results[i]?.bufferPostId || null;
-      post.scheduledAt = results[i]?.scheduledAt || post.scheduledAt;
-      post.scheduledToBufferAt = new Date().toISOString();
-
-      // Update this specific post in MongoDB
-      persistOne(post).catch(() => {});
+    if (post && post._postId) {
+      idsToDelete.push(post._postId);
     }
   });
-  writeQueueToFile(cachedPosts);
+
+  if (idsToDelete.length > 0) {
+    logger.info(`PostQueue: 🗑️ Deleting ${idsToDelete.length} post(s) from everywhere as they are now scheduled in Buffer`);
+    await deletePosts(idsToDelete);
+  }
 }
 
 /**
@@ -647,31 +651,47 @@ function isDuplicatePostError(errorMsg) {
 }
 
 /**
- * Delete a single post by _postId from in-memory cache, MongoDB, and local file.
- * Used to immediately remove posts that Buffer rejects as duplicates.
+ * Delete multiple posts by _postId from in-memory cache, MongoDB, and local file.
  *
- * @param {string} postId - The _postId of the post to delete
- * @returns {Promise<boolean>} true if a post was found and deleted
+ * @param {string[]} postIds - Array of _postId strings
  */
-async function deletePost(postId) {
-  const idx = cachedPosts.findIndex(p => p._postId === postId);
-  if (idx === -1) {
-    logger.debug(`PostQueue: deletePost — _postId "${postId}" not found in cache`);
-    return false;
-  }
-
-  const post = cachedPosts[idx];
-  logger.info(`PostQueue: 🗑️ Deleting post "${postId}" (index: ${post.index}, text: "${(post.text || '').slice(0, 60)}...")`);
-
-  // Remove from in-memory cache
-  cachedPosts.splice(idx, 1);
-
-  // Persist changes to local file
+async function deletePosts(postIds) {
+  if (!Array.isArray(postIds) || postIds.length === 0) return;
+  const idSet = new Set(postIds);
+  cachedPosts = cachedPosts.filter(p => !idSet.has(p._postId));
   writeQueueToFile(cachedPosts);
 
-  // Remove from MongoDB
-  await removeFromMongo(postId);
+  if (hasMongo()) {
+    try {
+      const db = getDb();
+      await db.collection(POSTS_COLLECTION).deleteMany({ _postId: { $in: postIds } });
+    } catch (err) {
+      logger.warn(`PostQueue: MongoDB deletePosts error — ${err.message}`);
+    }
+  }
+}
 
+/**
+ * Delete a single post by _postId from in-memory cache, MongoDB, and local file.
+ * Used to immediately remove posts that are scheduled to Buffer or rejected as duplicates.
+ *
+ * @param {string} postId - The _postId of the post to delete
+ * @returns {Promise<boolean>} true if deleted
+ */
+async function deletePost(postId) {
+  if (!postId) return false;
+  const idx = cachedPosts.findIndex(p => p._postId === postId);
+  if (idx !== -1) {
+    const post = cachedPosts[idx];
+    logger.info(`PostQueue: 🗑️ Deleting post "${postId}" (index: ${post.index}, text: "${(post.text || '').slice(0, 60)}...")`);
+    cachedPosts.splice(idx, 1);
+    writeQueueToFile(cachedPosts);
+  } else {
+    logger.debug(`PostQueue: deletePost — ensuring _postId "${postId}" removed from MongoDB`);
+  }
+
+  // Always remove from MongoDB
+  await removeFromMongo(postId);
   return true;
 }
 
@@ -709,6 +729,7 @@ module.exports = {
   writeQueue,
   getHistory,
   deletePost,
+  deletePosts,
   deletePostByIndex,
   isDuplicatePostError,
   postMatchesChannel,

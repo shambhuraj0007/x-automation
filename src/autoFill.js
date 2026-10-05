@@ -85,94 +85,11 @@ async function cleanupPublishedPosts(targetChannelId) {
   const channelId = targetChannelId || getActiveChannelId();
   const scheduled = postQueue.getScheduledPosts(channelId);
 
-  if (scheduled.length === 0) {
-    logger.debug('Cleanup: no scheduled posts in local queue — nothing to clean');
-    return;
-  }
-
-  logger.info(`Cleanup: verifying ${scheduled.length} scheduled post(s) against Buffer API for channel ${channelId}...`);
-
-  const indicesToMarkPublished = [];
-
-  try {
-    const [bufferInfo, sentPosts, failedPosts] = await Promise.all([
-      getBufferQueueInfo(channelId, true).catch(err => {
-        logger.warn(`Cleanup: could not fetch Buffer queue — ${err.message}`);
-        return null;
-      }),
-      getSentPosts(channelId).catch(err => {
-        logger.warn(`Cleanup: could not fetch sent posts — ${err.message}`);
-        return null;
-      }),
-      getFailedPosts(channelId).catch(err => {
-        logger.warn(`Cleanup: could not fetch failed posts — ${err.message}`);
-        return null;
-      }),
-    ]);
-
-    const activeBufferIds = bufferInfo?.posts ? new Set(bufferInfo.posts.map(p => p.id)) : null;
-    const sentIds = sentPosts ? new Set(sentPosts.map(p => p.id)) : null;
-    const failedIds = failedPosts ? new Set(failedPosts.map(p => p.id)) : null;
-    const now = Date.now();
-
+  if (scheduled.length > 0) {
+    logger.info(`Cleanup: 🗑️ Removing ${scheduled.length} scheduled post(s) from local queue/MongoDB as they belong to Buffer`);
     for (const post of scheduled) {
-      // 1. Check if explicitly marked as failed on Buffer
-      if (failedIds && post.bufferPostId && failedIds.has(post.bufferPostId)) {
-        logger.error(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) failed to publish on Twitter/Buffer`);
-        postQueue.markError(post.index, 'Buffer reported: publication failed on Twitter');
-        continue;
-      }
-
-      // 2. Check if explicitly verified in Buffer's sent posts
-      if (sentIds && post.bufferPostId && sentIds.has(post.bufferPostId)) {
-        indicesToMarkPublished.push(post.index);
-        logger.info(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) verified sent on Twitter`);
-        continue;
-      }
-
-      // 3. If live Buffer queue was fetched and does NOT contain this post:
-      // It is not in Buffer (already published, sent under another channel, or deleted)!
-      const scheduledMinutesAgo = post.scheduledToBufferAt
-        ? (now - new Date(post.scheduledToBufferAt).getTime()) / (1000 * 60)
-        : 999;
-
-      if (activeBufferIds && post.bufferPostId && !activeBufferIds.has(post.bufferPostId) && scheduledMinutesAgo > 1) {
-        indicesToMarkPublished.push(post.index);
-        logger.info(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) is not in Buffer active queue — marking published`);
-        continue;
-      }
-
-      // 4. If post has passed its scheduled time:
-      if (post.scheduledAt) {
-        const dueAt = new Date(post.scheduledAt).getTime();
-        const isPastDue = dueAt <= now;
-        const notInActiveBuffer = activeBufferIds ? !activeBufferIds.has(post.bufferPostId) : false;
-
-        if (isPastDue && notInActiveBuffer) {
-          indicesToMarkPublished.push(post.index);
-          logger.info(`Cleanup: post #${post.index} (due at ${post.scheduledAt}) is past due and no longer in Buffer queue — marking published`);
-          continue;
-        }
-
-        // Overdue fallback (>2h overdue)
-        const hoursOverdue = (now - dueAt) / (1000 * 60 * 60);
-        if (hoursOverdue > 2 && (notInActiveBuffer || !post.bufferPostId)) {
-          indicesToMarkPublished.push(post.index);
-          logger.info(`Cleanup: post #${post.index} was due ${Math.round(hoursOverdue)}h ago — marking published (overdue fallback)`);
-        }
-      }
+      await postQueue.deletePost(post._postId);
     }
-  } catch (err) {
-    logger.warn(`Cleanup: Buffer API check encountered an error — ${err.message}. Retaining queue for safety.`);
-  }
-
-  // Mark verified published posts and archive to history.json
-  if (indicesToMarkPublished.length > 0) {
-    postQueue.markPublished(indicesToMarkPublished);
-    const removed = await postQueue.removePublishedPosts(channelId);
-    logger.info(`Cleanup: ✅ archived and cleaned up ${removed} verified post(s) from active queue`);
-  } else {
-    logger.info('Cleanup: no new published posts to clean up');
   }
 
   // ── Auto-delete posts with Buffer "duplicate post" error ──
@@ -305,7 +222,8 @@ async function autoFillQueue(targetChannelId) {
           `[DRY RUN] AutoFill: would schedule post #${post.index} at ${scheduledAt.toISOString()}\n` +
           `"${post.text.slice(0, 100)}..."`
         );
-        postQueue.markScheduled([post.index], [{ scheduledAt: scheduledAt.toISOString() }]);
+        // Delete from everywhere as soon as scheduled in Buffer
+        await postQueue.deletePost(post._postId);
         successCount++;
       } else {
         // Quick 250ms spacing between posts
@@ -377,10 +295,8 @@ async function autoFillQueue(targetChannelId) {
           );
 
           logger.info(`AutoFill: ✅ scheduled post #${post.index} (id: ${res.id}) at ${res.dueAt}`);
-          postQueue.markScheduled([post.index], [{
-            bufferPostId: res.id,
-            scheduledAt: res.dueAt,
-          }]);
+          // Delete from everywhere as soon as scheduled in Buffer
+          await postQueue.deletePost(post._postId);
           successCount++;
 
         } catch (err) {
@@ -390,7 +306,7 @@ async function autoFillQueue(targetChannelId) {
             break; // Stop trying this cycle, posts remain safe in queue for next cycle!
           } else if (postQueue.isDuplicatePostError(err.message)) {
             logger.warn(`AutoFill: 🗑️ Post #${post.index} rejected as duplicate by Buffer — deleting from queue and MongoDB`);
-            await postQueue.deletePostByIndex(post.index);
+            await postQueue.deletePost(post._postId);
           } else {
             logger.error(`AutoFill: ❌ failed to schedule post #${post.index} — ${err.message}`);
             postQueue.markError(post.index, err.message);

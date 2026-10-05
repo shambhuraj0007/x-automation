@@ -1,5 +1,6 @@
 'use strict';
 
+require('dotenv').config();
 const { MongoClient } = require('mongodb');
 const logger = require('./logger');
 
@@ -7,7 +8,6 @@ let client = null;
 let db = null;
 let isConnected = false;
 
-const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 const DB_NAME = process.env.MONGODB_DB_NAME || 'twitter_automation';
 
 /**

@@ -48,12 +48,12 @@ function printBanner() {
 
 // ── Environment validation ──────────────────────────────────────────────────
 function validateEnv() {
-  const required = ['BUFFER_ACCESS_TOKEN', 'BUFFER_CHANNEL_ID'];
+  const required = ['BUFFER_ACCESS_TOKEN', 'BUFFER_CHANNEL_ID', 'BUFFER_ORG_ID'];
   const missing = required.filter(key => !process.env[key] || process.env[key].startsWith('your_'));
 
   if (missing.length > 0) {
     logger.error(`Missing or placeholder environment variables: ${missing.join(', ')}`);
-    logger.error('Please fill in your Buffer API keys in .env');
+    logger.error('Please fill in your Buffer API keys in .env or Render environment');
     process.exit(1);
   }
 }
