@@ -19,6 +19,7 @@
 const express = require('express');
 const logger = require('./logger');
 const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, setActiveChannelId, clearBufferCache } = require('./buffer');
+const { hasMongo } = require('./db');
 const postQueue = require('./postQueue');
 const { isDuplicatePostError } = postQueue;
 const { autoFillQueue, cleanupPublishedPosts } = require('./autoFill');
@@ -31,35 +32,29 @@ const pRetry = require('p-retry').default;
 
 const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
 
-// ── Blackout: skip 2 AM – 6 AM ──────────────────────────────────────────
+// ── Blackout: skip 2 AM – 6 AM IST ──────────────────────────────────────────
 
-const BLACKOUT_START = 2;
-const BLACKOUT_END = 6;
 const TIMEZONE = process.env.TIMEZONE || 'Asia/Kolkata';
-
-function getHourInTimezone(date, tz = TIMEZONE) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour: 'numeric',
-      hour12: false,
-    }).formatToParts(date);
-    const hourPart = parts.find(p => p.type === 'hour');
-    return hourPart ? parseInt(hourPart.value, 10) : date.getHours();
-  } catch {
-    return date.getHours();
-  }
-}
 
 function skipBlackout(date, tz = TIMEZONE) {
   let d = new Date(date.getTime());
-  let hour = getHourInTimezone(d, tz);
-  if (hour >= BLACKOUT_START && hour < BLACKOUT_END) {
-    while (hour >= BLACKOUT_START && hour < BLACKOUT_END) {
-      d = new Date(d.getTime() + 30 * 60 * 1000);
-      hour = getHourInTimezone(d, tz);
-    }
-    d.setMinutes(0, 0, 0);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(d);
+  const h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+  const m = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+  const hour = h === 24 ? 0 : h;
+
+  // 2:00 AM to 5:59:59 AM IST blackout window: advance directly to 6:00:00 AM IST
+  if (hour >= 2 && hour < 6) {
+    const minutesToSix = (6 - hour) * 60 - m;
+    d = new Date(d.getTime() + minutesToSix * 60 * 1000);
+    d.setSeconds(0, 0);
   }
   return d;
 }
@@ -473,6 +468,7 @@ router.get('/queue', async (req, res) => {
       minSpacing,
       maxSpacing,
       localQueue: stats,
+      mongoConnected: hasMongo(),
     });
   } catch (err) {
     logger.error(`API: /queue error — ${err.message}`);
@@ -484,6 +480,7 @@ router.get('/queue', async (req, res) => {
       minSpacing: 60,
       maxSpacing: 90,
       localQueue: postQueue.getStats(),
+      mongoConnected: hasMongo(),
       error: err.message,
     });
   }

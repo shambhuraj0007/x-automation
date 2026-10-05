@@ -255,6 +255,46 @@ body::before {
   animation: pulse-dot 2s ease-in-out infinite;
 }
 
+.db-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  transition: all var(--duration-normal) var(--ease-out);
+}
+
+.db-badge:hover {
+  border-color: var(--border-accent);
+}
+
+.db-badge__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background var(--duration-normal);
+}
+
+.db-badge--connected .db-badge__dot {
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.db-badge--disconnected .db-badge__dot {
+  background: #f59e0b;
+}
+
+.db-badge__text {
+  font-weight: 500;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }

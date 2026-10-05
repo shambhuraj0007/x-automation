@@ -19,42 +19,33 @@ const postQueue = require('./postQueue');
 
 let isRefilling = false;
 
-// ── Blackout window ─────────────────────────────────────────────────────
+// ── Blackout window (2:00 AM – 6:00 AM IST) ────────────────────────────
 
-const BLACKOUT_START_HOUR = 2;  // 2:00 AM
-const BLACKOUT_END_HOUR = 6;   // 6:00 AM
 const TIMEZONE = process.env.TIMEZONE || 'Asia/Kolkata';
 
 /**
- * Get hour of a date in the target timezone.
- */
-function getHourInTimezone(date, tz = TIMEZONE) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour: 'numeric',
-      hour12: false,
-    }).formatToParts(date);
-    const hourPart = parts.find(p => p.type === 'hour');
-    return hourPart ? parseInt(hourPart.value, 10) : date.getHours();
-  } catch {
-    return date.getHours();
-  }
-}
-
-/**
- * If a date falls within the 2 AM – 6 AM blackout window in TIMEZONE,
- * push it forward to 6 AM same day.
+ * If a date falls within the 2 AM – 6 AM IST blackout window,
+ * push it directly forward to 6:00:00 AM IST.
  */
 function skipBlackout(date, tz = TIMEZONE) {
   let d = new Date(date.getTime());
-  let hour = getHourInTimezone(d, tz);
-  if (hour >= BLACKOUT_START_HOUR && hour < BLACKOUT_END_HOUR) {
-    while (hour >= BLACKOUT_START_HOUR && hour < BLACKOUT_END_HOUR) {
-      d = new Date(d.getTime() + 30 * 60 * 1000);
-      hour = getHourInTimezone(d, tz);
-    }
-    d.setMinutes(0, 0, 0);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(d);
+  const h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+  const m = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+  const hour = h === 24 ? 0 : h;
+
+  // 2:00 AM to 5:59:59 AM IST blackout window: advance directly to 6:00:00 AM IST
+  if (hour >= 2 && hour < 6) {
+    const minutesToSix = (6 - hour) * 60 - m;
+    d = new Date(d.getTime() + minutesToSix * 60 * 1000);
+    d.setSeconds(0, 0);
   }
   return d;
 }

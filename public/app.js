@@ -143,20 +143,32 @@ function clearTextarea() {
   pasteTextarea.focus();
 }
 
-// ── Blackout: Skip 2 AM – 6 AM ───────────────────────────────────────────
+// ── Blackout: Skip 2 AM – 6 AM IST ───────────────────────────────────────────
 
-const BLACKOUT_START = 2; // 2:00 AM
-const BLACKOUT_END = 6;   // 6:00 AM
 const BUFFER_MAX_QUEUE = 10;
 
 /**
- * If a date falls within 2 AM – 6 AM, push it forward to 6 AM.
+ * If a date falls within 2 AM – 6 AM IST, push it directly forward to 6:00:00 AM IST.
  */
 function skipBlackout(date) {
-  const d = new Date(date.getTime());
-  const hour = d.getHours();
-  if (hour >= BLACKOUT_START && hour < BLACKOUT_END) {
-    d.setHours(BLACKOUT_END, 0, 0, 0);
+  let d = new Date(date.getTime());
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(d);
+  const h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+  const m = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+  const hour = h === 24 ? 0 : h;
+
+  // 2:00 AM to 5:59:59 AM IST blackout window: advance directly to 6:00:00 AM IST
+  if (hour >= 2 && hour < 6) {
+    const minutesToSix = (6 - hour) * 60 - m;
+    d = new Date(d.getTime() + minutesToSix * 60 * 1000);
+    d.setSeconds(0, 0);
   }
   return d;
 }
@@ -987,6 +999,21 @@ async function fetchQueueCount() {
       queueCount.textContent += ` · ${pending} queued`;
     }
 
+    // Update MongoDB status badge on screen
+    const dbBadge = document.getElementById('db-badge');
+    const dbBadgeText = document.getElementById('db-badge-text');
+    if (dbBadge && dbBadgeText) {
+      if (data.mongoConnected) {
+        dbBadge.className = 'db-badge db-badge--connected';
+        dbBadgeText.textContent = 'MongoDB Connected';
+        dbBadge.title = 'MongoDB database is connected and active';
+      } else {
+        dbBadge.className = 'db-badge db-badge--disconnected';
+        dbBadgeText.textContent = 'Local File Mode';
+        dbBadge.title = 'MongoDB not connected — using local JSON persistence';
+      }
+    }
+
     updateStartTimeDefault();
     if (posts.length > 0 && !userManuallySetStartTime) {
       const hasPending = posts.some(p => p.status === 'pending');
@@ -994,6 +1021,12 @@ async function fetchQueueCount() {
     }
   } catch {
     queueCount.textContent = '—';
+    const dbBadge = document.getElementById('db-badge');
+    const dbBadgeText = document.getElementById('db-badge-text');
+    if (dbBadge && dbBadgeText) {
+      dbBadge.className = 'db-badge db-badge--disconnected';
+      dbBadgeText.textContent = 'Offline';
+    }
   }
 }
 
