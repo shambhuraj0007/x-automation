@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js",
+    "dev": "node --watch --watch-path=src --watch-path=index.js index.js",
     "dashboard": "node index.js",
     "setup": "node src/setup.js",
     "test": "node tests/test.js"

@@ -14,9 +14,8 @@
 
 const cron = require('node-cron');
 const logger = require('./logger');
-const { getBufferQueueInfo, getQueueCount, getActiveChannelId, getSentPosts, getFailedPosts, clearBufferCache } = require('./buffer');
+const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, getSentPosts, getFailedPosts, clearBufferCache } = require('./buffer');
 const postQueue = require('./postQueue');
-const { schedulePostToBuffer } = require('./api');
 
 let isRefilling = false;
 
@@ -82,8 +81,8 @@ function nextPostTime(baseTime, minSpacingMin, maxSpacingMin) {
  *   2. Check Buffer failed posts (status: error) -> mark error, retain in queue
  *   3. Only fall back to time-based cleanup if post is >6 hours overdue AND API confirmed
  */
-async function cleanupPublishedPosts() {
-  const channelId = getActiveChannelId();
+async function cleanupPublishedPosts(targetChannelId) {
+  const channelId = targetChannelId || getActiveChannelId();
   const scheduled = postQueue.getScheduledPosts(channelId);
 
   if (scheduled.length === 0) {
@@ -91,21 +90,16 @@ async function cleanupPublishedPosts() {
     return;
   }
 
-  // Optimize API calls: Only query Buffer if at least one post has reached or passed its scheduled time
-  const now = Date.now();
-  const hasPastDuePosts = scheduled.some(p => p.scheduledAt && new Date(p.scheduledAt).getTime() <= now);
-  if (!hasPastDuePosts) {
-    logger.debug('Cleanup: no scheduled posts have reached their due time yet — skipping Buffer sent/failed checks');
-    return;
-  }
-
-  logger.info(`Cleanup: verifying ${scheduled.length} scheduled post(s) against Buffer API...`);
+  logger.info(`Cleanup: verifying ${scheduled.length} scheduled post(s) against Buffer API for channel ${channelId}...`);
 
   const indicesToMarkPublished = [];
-  let bufferApiSuccess = false;
 
   try {
-    const [sentPosts, failedPosts] = await Promise.all([
+    const [bufferInfo, sentPosts, failedPosts] = await Promise.all([
+      getBufferQueueInfo(channelId, true).catch(err => {
+        logger.warn(`Cleanup: could not fetch Buffer queue — ${err.message}`);
+        return null;
+      }),
       getSentPosts(channelId).catch(err => {
         logger.warn(`Cleanup: could not fetch sent posts — ${err.message}`);
         return null;
@@ -116,12 +110,10 @@ async function cleanupPublishedPosts() {
       }),
     ]);
 
+    const activeBufferIds = bufferInfo?.posts ? new Set(bufferInfo.posts.map(p => p.id)) : null;
     const sentIds = sentPosts ? new Set(sentPosts.map(p => p.id)) : null;
     const failedIds = failedPosts ? new Set(failedPosts.map(p => p.id)) : null;
-
-    if (sentIds !== null) {
-      bufferApiSuccess = true;
-    }
+    const now = Date.now();
 
     for (const post of scheduled) {
       // 1. Check if explicitly marked as failed on Buffer
@@ -138,14 +130,35 @@ async function cleanupPublishedPosts() {
         continue;
       }
 
-      // 3. Fallback: only if post is past scheduledAt by more than 6 hours AND API check ran
-      if (post.scheduledAt) {
-        const dueAt = new Date(post.scheduledAt);
-        const hoursOverdue = (Date.now() - dueAt.getTime()) / (1000 * 60 * 60);
+      // 3. If live Buffer queue was fetched and does NOT contain this post:
+      // It is not in Buffer (already published, sent under another channel, or deleted)!
+      const scheduledMinutesAgo = post.scheduledToBufferAt
+        ? (now - new Date(post.scheduledToBufferAt).getTime()) / (1000 * 60)
+        : 999;
 
-        if (bufferApiSuccess && hoursOverdue > 6) {
-          logger.info(`Cleanup: post #${post.index} was due ${Math.round(hoursOverdue)}h ago (${post.scheduledAt}) — marking published (overdue fallback)`);
+      if (activeBufferIds && post.bufferPostId && !activeBufferIds.has(post.bufferPostId) && scheduledMinutesAgo > 1) {
+        indicesToMarkPublished.push(post.index);
+        logger.info(`Cleanup: post #${post.index} (id: ${post.bufferPostId}) is not in Buffer active queue — marking published`);
+        continue;
+      }
+
+      // 4. If post has passed its scheduled time:
+      if (post.scheduledAt) {
+        const dueAt = new Date(post.scheduledAt).getTime();
+        const isPastDue = dueAt <= now;
+        const notInActiveBuffer = activeBufferIds ? !activeBufferIds.has(post.bufferPostId) : false;
+
+        if (isPastDue && notInActiveBuffer) {
           indicesToMarkPublished.push(post.index);
+          logger.info(`Cleanup: post #${post.index} (due at ${post.scheduledAt}) is past due and no longer in Buffer queue — marking published`);
+          continue;
+        }
+
+        // Overdue fallback (>2h overdue)
+        const hoursOverdue = (now - dueAt) / (1000 * 60 * 60);
+        if (hoursOverdue > 2 && (notInActiveBuffer || !post.bufferPostId)) {
+          indicesToMarkPublished.push(post.index);
+          logger.info(`Cleanup: post #${post.index} was due ${Math.round(hoursOverdue)}h ago — marking published (overdue fallback)`);
         }
       }
     }
@@ -156,10 +169,24 @@ async function cleanupPublishedPosts() {
   // Mark verified published posts and archive to history.json
   if (indicesToMarkPublished.length > 0) {
     postQueue.markPublished(indicesToMarkPublished);
-    const removed = postQueue.removePublishedPosts(channelId);
+    const removed = await postQueue.removePublishedPosts(channelId);
     logger.info(`Cleanup: ✅ archived and cleaned up ${removed} verified post(s) from active queue`);
   } else {
     logger.info('Cleanup: no new published posts to clean up');
+  }
+
+  // ── Auto-delete posts with Buffer "duplicate post" error ──
+  const errorPosts = postQueue.getAllPosts(channelId).filter(p => p.status === 'error');
+  let duplicateDeleteCount = 0;
+  for (const post of errorPosts) {
+    if (postQueue.isDuplicatePostError(post.error)) {
+      logger.warn(`Cleanup: 🗑️ Removing duplicate-error post #${post.index} ("${(post.text || '').slice(0, 60)}...")`);
+      await postQueue.deletePost(post._postId);
+      duplicateDeleteCount++;
+    }
+  }
+  if (duplicateDeleteCount > 0) {
+    logger.info(`Cleanup: 🗑️ Auto-deleted ${duplicateDeleteCount} post(s) with duplicate-post errors`);
   }
 }
 
@@ -202,43 +229,43 @@ function rescheduleExpiredPendingPosts(channelId) {
 /**
  * Clean up published posts, then check Buffer queue and fill it up to 10 from the local queue.
  */
-async function autoFillQueue() {
+async function autoFillQueue(targetChannelId) {
   if (isRefilling) {
     logger.debug('AutoFill: refill already in progress — skipping');
-    return;
+    return { scheduledCount: 0, inProgress: true };
   }
 
   isRefilling = true;
 
   try {
-    const channelId = getActiveChannelId();
+    const channelId = targetChannelId || getActiveChannelId();
 
     // 0. Reschedule any pending posts that expired while server was offline!
     rescheduleExpiredPendingPosts(channelId);
 
     // 1. Clean up posts that have already been published to Twitter
-    await cleanupPublishedPosts();
+    await cleanupPublishedPosts(channelId);
 
     // 2. Check current Buffer queue count and last scheduled time
-    const bufferInfo = await getBufferQueueInfo(channelId);
+    const bufferInfo = await getBufferQueueInfo(channelId, true);
     const currentCount = bufferInfo.count;
     const lastScheduledAt = bufferInfo.lastScheduledAt;
     logger.info(`AutoFill: Buffer queue has ${currentCount} post(s). Last scheduled at: ${lastScheduledAt || 'none'}`);
 
     if (currentCount >= postQueue.BUFFER_MAX_QUEUE) {
       logger.info(`AutoFill: queue is full (${currentCount}/${postQueue.BUFFER_MAX_QUEUE}) — no refill needed`);
-      return;
+      return { scheduledCount: 0, queueFull: true, bufferCount: currentCount };
     }
 
     // 3. How many slots to fill
     const slotsToFill = postQueue.BUFFER_MAX_QUEUE - currentCount;
-    logger.info(`AutoFill: need to fill ${slotsToFill} slot(s)`);
+    logger.info(`AutoFill: need to fill ${slotsToFill} slot(s) for channel ${channelId}`);
 
     // 4. Get pending posts from queue
     const pending = postQueue.getPendingPosts(channelId);
     if (pending.length === 0) {
       logger.info(`AutoFill: no pending posts in queue for channel ${channelId} — nothing to schedule`);
-      return;
+      return { scheduledCount: 0, bufferCount: currentCount, remainingQueued: 0 };
     }
 
     const toSchedule = pending.slice(0, slotsToFill);
@@ -265,8 +292,9 @@ async function autoFillQueue() {
     const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
     const token = process.env.BUFFER_ACCESS_TOKEN;
 
-    for (let i = 0; i < toSchedule.length; i++) {
-      const post = toSchedule[i];
+    let successCount = 0;
+    for (let i = 0; i < pending.length && successCount < slotsToFill; i++) {
+      const post = pending[i];
 
       // Calculate time: first post goes out after min spacing from now
       const scheduledAt = nextPostTime(baseTime, minSpacing, maxSpacing);
@@ -278,9 +306,10 @@ async function autoFillQueue() {
           `"${post.text.slice(0, 100)}..."`
         );
         postQueue.markScheduled([post.index], [{ scheduledAt: scheduledAt.toISOString() }]);
+        successCount++;
       } else {
         // Quick 250ms spacing between posts
-        if (i > 0) {
+        if (successCount > 0) {
           await new Promise(resolve => setTimeout(resolve, 250));
         }
 
@@ -352,12 +381,16 @@ async function autoFillQueue() {
             bufferPostId: res.id,
             scheduledAt: res.dueAt,
           }]);
+          successCount++;
 
         } catch (err) {
           const is429 = err.response?.status === 429 || (err.message && err.message.includes('429'));
           if (is429) {
             logger.warn(`AutoFill: ⚠️ Buffer 429 rate limit reached. Halting refill run; remaining posts safely kept in queue.`);
             break; // Stop trying this cycle, posts remain safe in queue for next cycle!
+          } else if (postQueue.isDuplicatePostError(err.message)) {
+            logger.warn(`AutoFill: 🗑️ Post #${post.index} rejected as duplicate by Buffer — deleting from queue and MongoDB`);
+            await postQueue.deletePostByIndex(post.index);
           } else {
             logger.error(`AutoFill: ❌ failed to schedule post #${post.index} — ${err.message}`);
             postQueue.markError(post.index, err.message);
@@ -366,14 +399,22 @@ async function autoFillQueue() {
       }
     }
 
-    const stats = postQueue.getStats();
-    if (toSchedule.length > 0) {
+    const stats = postQueue.getStats(channelId);
+    if (successCount > 0) {
       clearBufferCache();
     }
     logger.info(`AutoFill: done — ${stats.scheduled} scheduled, ${stats.pending} pending, ${stats.errored} errored`);
 
+    return {
+      scheduledCount: successCount,
+      bufferCount: currentCount + successCount,
+      queueFull: (currentCount + successCount) >= postQueue.BUFFER_MAX_QUEUE,
+      remainingQueued: stats.pending,
+    };
+
   } catch (err) {
     logger.error(`AutoFill: error — ${err.message}`, err);
+    throw err;
   } finally {
     isRefilling = false;
   }
@@ -389,9 +430,17 @@ function startAutoFillCron() {
   logger.info(`AutoFill: starting cron with schedule "${cronExpr}" (keeps Buffer at 10 posts)`);
 
   const task = cron.schedule(cronExpr, async () => {
-    logger.info('AutoFill: ⏰ Scheduled cron triggered — checking queue...');
+    logger.info('AutoFill: ⏰ Scheduled cron triggered — checking queue for all channels...');
     try {
-      await autoFillQueue();
+      const channels = await getChannels().catch(() => []);
+      if (channels && channels.length > 0) {
+        for (const ch of channels) {
+          logger.info(`AutoFill: running check for channel "${ch.displayName || ch.name}" (${ch.id})`);
+          await autoFillQueue(ch.id);
+        }
+      } else {
+        await autoFillQueue();
+      }
     } catch (err) {
       logger.error(`AutoFill: ❌ Error during cron cycle — ${err.message}`, err);
     }

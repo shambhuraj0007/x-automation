@@ -20,6 +20,8 @@ const express = require('express');
 const logger = require('./logger');
 const { getBufferQueueInfo, getQueueCount, getChannels, getActiveChannelId, setActiveChannelId, clearBufferCache } = require('./buffer');
 const postQueue = require('./postQueue');
+const { isDuplicatePostError } = postQueue;
+const { autoFillQueue, cleanupPublishedPosts } = require('./autoFill');
 
 const router = express.Router();
 
@@ -322,6 +324,16 @@ router.post('/schedule', async (req, res) => {
               scheduledAt: post.scheduledAt,
               status: 'queued',
             });
+          } else if (isDuplicatePostError(err.message)) {
+            logger.warn(`API: 🗑️ Post #${postIndex} rejected as duplicate by Buffer — deleting from queue and MongoDB`);
+            await postQueue.deletePostByIndex(postIndex);
+            results.push({
+              index: postIndex,
+              success: false,
+              error: 'Duplicate post — auto-deleted',
+              scheduledAt: post.scheduledAt,
+              status: 'deleted',
+            });
           } else {
             logger.error(`API: ❌ Failed to schedule post #${postIndex} — ${err.message}`);
             postQueue.markError(postIndex, err.message);
@@ -402,10 +414,32 @@ router.post('/channels/switch', async (req, res) => {
     }
 
     setActiveChannelId(channelId);
+    clearBufferCache();
     logger.info(`API: switched active channel to "${matched.displayName || matched.name}" (${channelId})`);
+
+    // Clean up and top up queue for this channel in the background
+    autoFillQueue(channelId).catch(err => {
+      logger.warn(`API: channel switch autoFill note — ${err.message}`);
+    });
+
     res.json({ success: true, activeChannelId: channelId, channel: matched });
   } catch (err) {
     logger.error(`API: /channels/switch error — ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/queue/refill ───────────────────────────────────────────────
+
+router.post('/queue/refill', async (req, res) => {
+  try {
+    const channelId = req.body?.channelId || getActiveChannelId();
+    clearBufferCache();
+    const result = await autoFillQueue(channelId);
+    clearBufferCache();
+    res.json({ success: true, channelId, ...result });
+  } catch (err) {
+    logger.error(`API: /queue/refill error — ${err.message}`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -463,12 +497,17 @@ router.get('/posts', async (req, res) => {
   try {
     const targetChannelId = req.query.channelId || getActiveChannelId();
 
+    // 0. Clean up published / past-due posts for this channel
+    await cleanupPublishedPosts(targetChannelId).catch(err => {
+      logger.warn(`API: pre-fetch cleanup note — ${err.message}`);
+    });
+
     // 1. Fetch live scheduled posts from Buffer
     let bufferPosts = [];
     let bufferCount = 0;
     try {
       if (targetChannelId) {
-        const bufferInfo = await getBufferQueueInfo(targetChannelId);
+        const bufferInfo = await getBufferQueueInfo(targetChannelId, true);
         bufferPosts = bufferInfo.posts || [];
         bufferCount = bufferInfo.count || 0;
       }
@@ -486,32 +525,81 @@ router.get('/posts', async (req, res) => {
     bufferPosts.forEach(bp => {
       bufferPostMap.set(bp.id, bp);
     });
+    const bufferTextMap = new Map();
+    bufferPosts.forEach(bp => {
+      const txt = (bp.text || '').trim().toLowerCase();
+      if (txt) bufferTextMap.set(txt, bp);
+    });
 
     if (localPosts.length > 0) {
+      const postsToMarkPublished = [];
+
       localPosts.forEach(lp => {
+        const lpText = (lp.text || '').trim().toLowerCase();
         if (lp.status === 'scheduled') {
-          const matchingBufferPost = lp.bufferPostId ? bufferPostMap.get(lp.bufferPostId) : null;
-          combinedPosts.push({
-            id: lp.bufferPostId || ('p_' + lp.index),
-            index: lp.index,
-            text: lp.text,
-            status: 'scheduled',
-            scheduledAt: matchingBufferPost?.dueAt || lp.scheduledAt,
-            inBuffer: true,
-          });
+          // Check if this post actually exists in Buffer's active queue
+          let matchingBufferPost = lp.bufferPostId ? bufferPostMap.get(lp.bufferPostId) : null;
+          if (!matchingBufferPost && lpText) {
+            matchingBufferPost = bufferTextMap.get(lpText) || null;
+          }
+
           if (matchingBufferPost) {
+            combinedPosts.push({
+              id: matchingBufferPost.id,
+              index: lp.index,
+              text: lp.text,
+              status: 'scheduled',
+              scheduledAt: matchingBufferPost.dueAt || lp.scheduledAt,
+              inBuffer: true,
+            });
             bufferPostMap.delete(matchingBufferPost.id);
+            if (lpText) bufferTextMap.delete(lpText);
+          } else {
+            // It's marked 'scheduled' locally, but is NOT in Buffer's active queue.
+            // If its scheduled time is past, it was already published.
+            const isPast = lp.scheduledAt && new Date(lp.scheduledAt).getTime() <= Date.now();
+            if (isPast) {
+              postsToMarkPublished.push(lp.index);
+            } else {
+              // Future post not in Buffer: keep as queued
+              combinedPosts.push({
+                id: 'p_' + lp.index,
+                index: lp.index,
+                text: lp.text,
+                status: 'queued',
+                scheduledAt: lp.scheduledAt,
+                inBuffer: false,
+              });
+            }
           }
         } else if (lp.status === 'pending') {
-          // In local queue waiting for 4-hour auto-fill cron
-          combinedPosts.push({
-            id: 'p_' + lp.index,
-            index: lp.index,
-            text: lp.text,
-            status: 'queued', // UI displays as "🕐 Queued (auto-fill)"
-            scheduledAt: lp.scheduledAt,
-            inBuffer: false,
-          });
+          // Check if it already exists in Buffer
+          const matchingBufferPost = lpText ? bufferTextMap.get(lpText) : null;
+          if (matchingBufferPost) {
+            lp.status = 'scheduled';
+            lp.bufferPostId = matchingBufferPost.id;
+            lp.scheduledAt = matchingBufferPost.dueAt;
+            combinedPosts.push({
+              id: matchingBufferPost.id,
+              index: lp.index,
+              text: lp.text,
+              status: 'scheduled',
+              scheduledAt: matchingBufferPost.dueAt,
+              inBuffer: true,
+            });
+            bufferPostMap.delete(matchingBufferPost.id);
+            if (lpText) bufferTextMap.delete(lpText);
+          } else {
+            // In local queue waiting for auto-fill
+            combinedPosts.push({
+              id: 'p_' + lp.index,
+              index: lp.index,
+              text: lp.text,
+              status: 'queued', // UI displays as "🕐 Queued (auto-fill)"
+              scheduledAt: lp.scheduledAt,
+              inBuffer: false,
+            });
+          }
         } else if (lp.status === 'error') {
           combinedPosts.push({
             id: 'p_' + lp.index,
@@ -524,6 +612,12 @@ router.get('/posts', async (req, res) => {
           });
         }
       });
+
+      // Cleanup any ghost posts marked for publication
+      if (postsToMarkPublished.length > 0) {
+        postQueue.markPublished(postsToMarkPublished);
+        await postQueue.removePublishedPosts(targetChannelId);
+      }
 
       // Include any remaining Buffer posts not in local queue
       bufferPostMap.forEach(bp => {

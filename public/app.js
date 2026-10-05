@@ -760,10 +760,69 @@ async function scheduleAll() {
   if (isScheduling) return;
 
   const pendingPosts = posts.filter(p => p.status === 'pending');
+  const queuedPosts = posts.filter(p => p.status === 'queued');
+  const scheduledPosts = posts.filter(p => p.status === 'scheduled');
+
   if (pendingPosts.length === 0) {
-    const scheduled = posts.filter(p => p.status === 'scheduled').length;
-    const queued = posts.filter(p => p.status === 'queued').length;
-    showToast(`All posts are already active (${scheduled} in Buffer, ${queued} queued). Paste more posts above to add to queue!`, 'info');
+    if (queuedPosts.length > 0) {
+      const bufferCount = scheduledPosts.length;
+      if (bufferCount >= 10) {
+        showToast(`Buffer queue is already full (10/10 posts). The remaining ${queuedPosts.length} queued posts will auto-schedule as posts publish!`, 'info');
+        return;
+      }
+
+      // Schedule next batch from queue to fill Buffer
+      const freeSlots = 10 - bufferCount;
+      const countToFill = Math.min(freeSlots, queuedPosts.length);
+      isScheduling = true;
+      btnSchedule.disabled = true;
+      if (btnAddMore) btnAddMore.disabled = true;
+      btnClearAll.disabled = true;
+      progressWrapper.classList.remove('hidden');
+      progressBar.style.width = '30%';
+
+      showToast(`🚀 Scheduling next ${countToFill} queued post(s) to Buffer...`, 'info');
+
+      try {
+        const res = await fetch('/api/queue/refill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channelId: activeChannelId }),
+        });
+        const data = await res.json();
+        progressBar.style.width = '100%';
+
+        if (!res.ok) throw new Error(data.error || 'Refill failed');
+
+        const scheduled = data.scheduledCount || 0;
+        if (scheduled > 0) {
+          showToast(`🚀 Successfully scheduled ${scheduled} post(s) to Buffer! (${data.bufferCount || (bufferCount + scheduled)}/10 in Buffer)`, 'success');
+        } else if (data.queueFull) {
+          showToast(`Buffer queue is full (${data.bufferCount || 10}/10).`, 'info');
+        } else {
+          showToast('Buffer is up to date.', 'info');
+        }
+
+        setTimeout(() => {
+          progressWrapper.classList.add('hidden');
+          progressBar.style.width = '0%';
+        }, 1200);
+
+        await fetchQueueCount();
+        await loadExistingPosts();
+      } catch (err) {
+        showToast(`❌ ${err.message}`, 'error');
+        progressWrapper.classList.add('hidden');
+      } finally {
+        isScheduling = false;
+        btnSchedule.disabled = false;
+        if (btnAddMore) btnAddMore.disabled = false;
+        btnClearAll.disabled = false;
+      }
+      return;
+    }
+
+    showToast('No posts in queue to schedule. Paste more posts above to add to queue!', 'info');
     return;
   }
 
@@ -1009,19 +1068,25 @@ async function onChannelChange() {
       body: JSON.stringify({ channelId: newChannelId }),
     });
 
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (res.ok && data.success) {
       activeChannelId = newChannelId;
       showToast(`Switched account to ${handle} 🐦`, 'success');
-      // Refresh queue count and load posts for the selected account
-      await fetchQueueCount();
-      await loadExistingPosts();
     } else {
-      throw new Error(data.error || 'Failed to switch account');
+      throw new Error(data.error || `Switch failed (status ${res.status})`);
     }
   } catch (err) {
-    showToast(`❌ ${err.message}`, 'error');
+    showToast(`❌ Failed to switch to ${handle}: ${err.message}`, 'error');
     selectChannel.value = activeChannelId; // revert
+    return;
+  }
+
+  // Refresh queue count and load posts for the selected account
+  try {
+    await fetchQueueCount();
+    await loadExistingPosts();
+  } catch (err) {
+    console.warn('Failed to load posts after account switch:', err);
   }
 }
 

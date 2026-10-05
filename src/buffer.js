@@ -15,12 +15,15 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const pRetry = require('p-retry').default;
+const pRetryModule = require('p-retry');
+const pRetry = pRetryModule.default || pRetryModule;
+const AbortError = pRetryModule.AbortError || Error;
 const logger = require('./logger');
 const { generateImage } = require('./imageGen');
 
 const BUFFER_GRAPHQL_URL = 'https://api.buffer.com/graphql';
 const CONFIG_FILE = path.join(process.cwd(), 'data', 'config.json');
+const CHANNELS_CACHE_FILE = path.join(process.cwd(), 'data', 'channels-cache.json');
 
 // ── In-Memory Cache for Buffer API Calls ─────────────────────────────────────
 const queueCache = new Map();
@@ -30,10 +33,23 @@ let channelsCache = null;
 let channelsCacheExpiresAt = 0;
 const CHANNELS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-function clearBufferCache() {
-  queueCache.clear();
-  channelsCache = null;
-  channelsCacheExpiresAt = 0;
+// Load channels from persistent cache file if present
+try {
+  if (fs.existsSync(CHANNELS_CACHE_FILE)) {
+    const raw = fs.readFileSync(CHANNELS_CACHE_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      channelsCache = parsed;
+    }
+  }
+} catch {}
+
+function clearBufferCache(targetChannelId) {
+  if (targetChannelId) {
+    queueCache.delete(targetChannelId);
+  } else {
+    queueCache.clear();
+  }
 }
 
 // ── Active Channel Management ──────────────────────────────────────────────
@@ -203,31 +219,42 @@ async function getChannels(forceRefresh = false) {
   if (!orgId) throw new pRetry.AbortError(new Error('BUFFER_ORG_ID is not set in .env'));
 
   const now = Date.now();
-  if (!forceRefresh && channelsCache && now < channelsCacheExpiresAt) {
+  if (!forceRefresh && channelsCache && channelsCache.length > 0 && now < channelsCacheExpiresAt) {
     logger.debug('Buffer: using cached channels list');
     return channelsCache;
   }
 
-  return pRetry(
-    async () => {
-      const data = await gql(`
-        query {
-          channels(input: { organizationId: "${orgId}" }) {
-            id
-            name
-            service
-            displayName
-            avatar
-            isQueuePaused
+  try {
+    return await pRetry(
+      async () => {
+        const data = await gql(`
+          query {
+            channels(input: { organizationId: "${orgId}" }) {
+              id
+              name
+              service
+              displayName
+              avatar
+              isQueuePaused
+            }
           }
-        }
-      `);
-      channelsCache = data.channels || [];
-      channelsCacheExpiresAt = Date.now() + CHANNELS_CACHE_TTL;
+        `);
+        channelsCache = data.channels || [];
+        channelsCacheExpiresAt = Date.now() + CHANNELS_CACHE_TTL;
+        try {
+          fs.writeFileSync(CHANNELS_CACHE_FILE, JSON.stringify(channelsCache, null, 2), 'utf-8');
+        } catch {}
+        return channelsCache;
+      },
+      { retries: 1, minTimeout: 1500 }
+    );
+  } catch (err) {
+    if (channelsCache && channelsCache.length > 0) {
+      logger.warn(`Buffer getChannels notice (${err.message}) — using cached channels list`);
       return channelsCache;
-    },
-    { retries: 1, minTimeout: 1500 }
-  );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -245,10 +272,10 @@ async function getBufferQueueInfo(targetChannelId, forceRefresh = false) {
   const channelId = targetChannelId || getActiveChannelId();
 
   if (!orgId || !channelId) {
-    throw new pRetry.AbortError(new Error(
+    throw new AbortError(
       'BUFFER_ORG_ID and BUFFER_CHANNEL_ID must be set in .env. ' +
       'Run: node src/setup.js to discover them automatically.'
-    ));
+    );
   }
 
   const now = Date.now();
@@ -427,7 +454,13 @@ async function _scheduleOne(channelId, postObj, scheduledAt, index, total) {
 
       // Check for GraphQL-level mutation errors
       if (result.message) {
-        throw new Error(`Buffer mutation error: ${result.message}`);
+        const errMsg = `Buffer mutation error: ${result.message}`;
+        // Duplicate post errors are permanent — don't retry
+        if (/already got this one scheduled or posted around the same time/i.test(result.message) ||
+            /not able to post the same thing twice/i.test(result.message)) {
+          throw new pRetry.AbortError(new Error(errMsg));
+        }
+        throw new Error(errMsg);
       }
 
       const post = result.post;
@@ -462,9 +495,9 @@ async function getSentPosts(targetChannelId) {
   const channelId = targetChannelId || getActiveChannelId();
 
   if (!orgId || !channelId) {
-    throw new pRetry.AbortError(new Error(
+    throw new AbortError(
       'BUFFER_ORG_ID and BUFFER_CHANNEL_ID must be set in .env.'
-    ));
+    );
   }
 
   return pRetry(

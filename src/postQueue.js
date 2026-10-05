@@ -36,6 +36,28 @@ if (!fs.existsSync(dataDir)) {
 // In-memory cache for fast synchronous reads
 let cachedPosts = [];
 
+/**
+ * Default fallback channel ID from environment or primary channel.
+ */
+function getDefaultChannelId() {
+  return process.env.BUFFER_CHANNEL_ID || '6ab9f0c0ea19ca0bde0e370e';
+}
+
+/**
+ * Check if a post belongs to a specified channelId.
+ * If channelId is null/undefined, matches all.
+ * Posts without explicit channelId belong to the default channel.
+ *
+ * @param {Object} post
+ * @param {string} [channelId]
+ * @returns {boolean}
+ */
+function postMatchesChannel(post, channelId) {
+  if (!channelId) return true;
+  const postChan = post.channelId || getDefaultChannelId();
+  return postChan === channelId;
+}
+
 // ── Read / Write Local File Helpers (Fallback) ────────────────────────────
 
 function readQueueFromFile() {
@@ -156,6 +178,9 @@ async function syncWithMongo() {
       // MongoDB has data — use it as source of truth
       cachedPosts = mongoPosts.map(doc => {
         const { _id, ...rest } = doc;
+        if (!rest.channelId) {
+          rest.channelId = getDefaultChannelId();
+        }
         return rest;
       });
       writeQueueToFile(cachedPosts);
@@ -256,6 +281,7 @@ function generatePostId() {
  * @param {string} [channelId]
  */
 function saveBatch(posts, channelId) {
+  const targetChannel = channelId || getDefaultChannelId();
   const now = new Date().toISOString();
   cachedPosts = posts.map((p, i) => ({
     _postId: generatePostId(),
@@ -264,7 +290,7 @@ function saveBatch(posts, channelId) {
     scheduledAt: p.scheduledAt,
     status: 'pending',
     bufferPostId: null,
-    channelId: channelId || null,
+    channelId: targetChannel,
     error: null,
     scheduledToBufferAt: null,
     createdAt: now,
@@ -307,6 +333,7 @@ function saveBatch(posts, channelId) {
  * @param {string} [channelId]
  */
 function appendBatch(newPosts, channelId) {
+  const targetChannel = channelId || getDefaultChannelId();
   const now = new Date().toISOString();
   const startIndex = cachedPosts.length;
 
@@ -317,7 +344,7 @@ function appendBatch(newPosts, channelId) {
     scheduledAt: p.scheduledAt,
     status: 'pending',
     bufferPostId: null,
-    channelId: channelId || null,
+    channelId: targetChannel,
     error: null,
     scheduledToBufferAt: null,
     createdAt: now,
@@ -350,7 +377,7 @@ function appendBatch(newPosts, channelId) {
 function getHighestScheduledTime(channelId) {
   let maxDate = null;
   for (const post of cachedPosts) {
-    if (channelId && post.channelId && post.channelId !== channelId) continue;
+    if (!postMatchesChannel(post, channelId)) continue;
     if (post.scheduledAt) {
       const d = new Date(post.scheduledAt);
       if (!isNaN(d.getTime())) {
@@ -381,12 +408,8 @@ function clearQueue(channelId) {
   }
 
   // Remove only posts for this channel
-  const toRemove = cachedPosts.filter(p => (!p.channelId || p.channelId === channelId) && p.status !== 'published');
-  cachedPosts = cachedPosts.filter(p => {
-    if (p.channelId && p.channelId !== channelId) return true;
-    if (!p.channelId && channelId) return false;
-    return p.status === 'published'; // keep published ones
-  });
+  const toRemove = cachedPosts.filter(p => postMatchesChannel(p, channelId) && p.status !== 'published');
+  cachedPosts = cachedPosts.filter(p => !postMatchesChannel(p, channelId) || p.status === 'published');
 
   if (hasMongo() && toRemove.length > 0) {
     const db = getDb();
@@ -409,7 +432,7 @@ function clearQueue(channelId) {
  */
 function getPendingPosts(channelId) {
   return cachedPosts.filter(p =>
-    p.status === 'pending' && (!channelId || !p.channelId || p.channelId === channelId)
+    p.status === 'pending' && postMatchesChannel(p, channelId)
   );
 }
 
@@ -420,7 +443,7 @@ function getPendingPosts(channelId) {
  */
 function getAllPosts(channelId) {
   if (!channelId) return cachedPosts;
-  return cachedPosts.filter(p => !p.channelId || p.channelId === channelId);
+  return cachedPosts.filter(p => postMatchesChannel(p, channelId));
 }
 
 /**
@@ -467,7 +490,7 @@ function markError(index, error) {
  */
 function getStats(channelId) {
   const posts = channelId
-    ? cachedPosts.filter(p => !p.channelId || p.channelId === channelId)
+    ? cachedPosts.filter(p => postMatchesChannel(p, channelId))
     : cachedPosts;
   return {
     total: posts.length,
@@ -485,7 +508,7 @@ function getStats(channelId) {
  */
 function getScheduledPosts(channelId) {
   return cachedPosts.filter(p =>
-    p.status === 'scheduled' && (!channelId || !p.channelId || p.channelId === channelId)
+    p.status === 'scheduled' && postMatchesChannel(p, channelId)
   );
 }
 
@@ -558,7 +581,7 @@ function getHistory(channelId) {
     if (fs.existsSync(HISTORY_FILE)) {
       const history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
       if (!channelId) return history;
-      return history.filter(p => !p.channelId || p.channelId === channelId);
+      return history.filter(p => postMatchesChannel(p, channelId));
     }
   } catch (err) {
     logger.warn(`PostQueue: failed to read history — ${err.message}`);
@@ -572,12 +595,12 @@ function getHistory(channelId) {
  * @param {string} [channelId]
  * @returns {number} Number of posts removed
  */
-function removePublishedPosts(channelId) {
+async function removePublishedPosts(channelId) {
   const before = cachedPosts.length;
 
   const published = cachedPosts.filter(p => {
     if (p.status !== 'published') return false;
-    if (channelId && p.channelId && p.channelId !== channelId) return false;
+    if (channelId && !postMatchesChannel(p, channelId)) return false;
     return true;
   });
 
@@ -589,15 +612,18 @@ function removePublishedPosts(channelId) {
       const db = getDb();
       const ids = published.map(p => p._postId).filter(Boolean);
       if (ids.length > 0) {
-        db.collection(POSTS_COLLECTION).deleteMany({ _postId: { $in: ids } })
-          .catch(err => logger.warn(`PostQueue: MongoDB remove published error — ${err.message}`));
+        try {
+          await db.collection(POSTS_COLLECTION).deleteMany({ _postId: { $in: ids } });
+        } catch (err) {
+          logger.warn(`PostQueue: MongoDB remove published error — ${err.message}`);
+        }
       }
     }
   }
 
   cachedPosts = cachedPosts.filter(p => {
     if (p.status !== 'published') return true;
-    if (channelId && p.channelId && p.channelId !== channelId) return true;
+    if (channelId && !postMatchesChannel(p, channelId)) return true;
     return false;
   });
 
@@ -607,6 +633,61 @@ function removePublishedPosts(channelId) {
     logger.info(`PostQueue: removed ${removed} published post(s) from queue`);
   }
   return removed;
+}
+
+/**
+ * Check if an error message is the Buffer "duplicate post" error.
+ * @param {string} errorMsg
+ * @returns {boolean}
+ */
+function isDuplicatePostError(errorMsg) {
+  if (!errorMsg) return false;
+  return /already got this one scheduled or posted around the same time/i.test(errorMsg) ||
+         /not able to post the same thing twice/i.test(errorMsg);
+}
+
+/**
+ * Delete a single post by _postId from in-memory cache, MongoDB, and local file.
+ * Used to immediately remove posts that Buffer rejects as duplicates.
+ *
+ * @param {string} postId - The _postId of the post to delete
+ * @returns {Promise<boolean>} true if a post was found and deleted
+ */
+async function deletePost(postId) {
+  const idx = cachedPosts.findIndex(p => p._postId === postId);
+  if (idx === -1) {
+    logger.debug(`PostQueue: deletePost — _postId "${postId}" not found in cache`);
+    return false;
+  }
+
+  const post = cachedPosts[idx];
+  logger.info(`PostQueue: 🗑️ Deleting post "${postId}" (index: ${post.index}, text: "${(post.text || '').slice(0, 60)}...")`);
+
+  // Remove from in-memory cache
+  cachedPosts.splice(idx, 1);
+
+  // Persist changes to local file
+  writeQueueToFile(cachedPosts);
+
+  // Remove from MongoDB
+  await removeFromMongo(postId);
+
+  return true;
+}
+
+/**
+ * Delete a single post by its 1-based index from in-memory cache, MongoDB, and local file.
+ *
+ * @param {number} index - The 1-based index of the post to delete
+ * @returns {Promise<boolean>} true if a post was found and deleted
+ */
+async function deletePostByIndex(index) {
+  const post = cachedPosts.find(p => p.index === index);
+  if (!post) {
+    logger.debug(`PostQueue: deletePostByIndex — index ${index} not found in cache`);
+    return false;
+  }
+  return deletePost(post._postId);
 }
 
 module.exports = {
@@ -627,4 +708,9 @@ module.exports = {
   readQueue,
   writeQueue,
   getHistory,
+  deletePost,
+  deletePostByIndex,
+  isDuplicatePostError,
+  postMatchesChannel,
+  getDefaultChannelId,
 };
